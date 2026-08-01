@@ -73,7 +73,7 @@ returns a clean human-friendly Markdown summary from the following response:
         }
       }
     }
-  ````
+  ```
 
 ## Quickstart
 
@@ -89,7 +89,7 @@ returns a clean human-friendly Markdown summary from the following response:
 Navigate to the stdio_mcp fork:
 
 ```bash
-DATABASE_PATH="priv/mcp.db" mix setup && mix compile
+DATABASE_PATH="priv/mcp.db" mix setup
 ```
 
 ### AI Code Assistant Configuration
