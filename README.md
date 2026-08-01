@@ -42,7 +42,7 @@ A lightweight Elixir MCP server designed to run over `stdio` transport.
 - Elixir 1.15+
 - [SQLite](https://www.sqlite.org/) installed
 - [sqlite-vec](https://github.com/asg017/sqlite-vec) extension installed
-- A [Mistral API key](https://console.mistral.ai/)
+- An AI API provider, eg [Mistral](https://console.mistral.ai/)
 
 ### Setup
 
@@ -107,7 +107,6 @@ get_token_usage(from: "2026-08-01", until: "2026-08-01")
 returns a clean human-friendly Markdown summary from the following response:
 
 ```json
- get_token_usage(from: "2026-08-01", until: "2026-08-01")
     {
       "total_requests": 12,
       "total_tokens": 10450,
