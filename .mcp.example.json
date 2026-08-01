@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "hex_local": {
+      "command": "mix",
+      "args": ["mcp.server", "--no-compile"],
+      "cwd": "your-path-here",
+      "env": {
+        "MIX_ENV": "prod",
+        "MISTRAL_API_KEY": "your-key-here",
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}

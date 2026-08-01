@@ -1,0 +1,8 @@
+erl_crash.dump
+_build/
+.expert/
+.claude/
+deps/
+priv/mcp.*
+.mcp.json
+.mcp_config.json
