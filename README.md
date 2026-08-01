@@ -35,46 +35,6 @@ A lightweight Elixir MCP server designed to run over `stdio` transport.
 | `remember` | Save a technical learning or pain point to the knowledge base |
 | `recall` | Search the knowledge base for relevant technical learnings |
 
-### Telemetry
-
-The tool `get_token_usage` returns the token consumption.
-
-The query:
-
-```bash
-get_token_usage(from: "2026-08-01", until: "2026-08-01")
-```
-
-returns a clean human-friendly Markdown summary from the following response:
-
-```json
- get_token_usage(from: "2026-08-01", until: "2026-08-01")
-    {
-      "total_requests": 12,
-      "total_tokens": 10450,
-      "total_prompt_tokens": 8200,
-      "total_completion_tokens": 2250,
-      "period": {
-        "from": "2026-08-01",
-        "until": "2026-08-01"
-      },
-      "by_model": {
-        "mistral-embed": {
-          "requests": 8,
-          "prompt_tokens": 6500,
-          "completion_tokens": 0,
-          "total_tokens": 6500
-        },
-        "mistral-small-latest": {
-          "requests": 4,
-          "prompt_tokens": 1700,
-          "completion_tokens": 2250,
-          "total_tokens": 3950
-        }
-      }
-    }
-  ```
-
 ## Quickstart
 
 ### Prerequisites
@@ -90,6 +50,7 @@ Navigate to the stdio_mcp fork:
 
 ```bash
 DATABASE_PATH="priv/mcp.db" mix setup
+mix compile
 ```
 
 ### AI Code Assistant Configuration
@@ -133,12 +94,63 @@ DATABASE_PATH="priv/mcp.db" mix setup
 }
 ```
 
+### Telemetry
+
+The tool `get_token_usage` returns the token consumption.
+
+The query:
+
+```bash
+get_token_usage(from: "2026-08-01", until: "2026-08-01")
+```
+
+returns a clean human-friendly Markdown summary from the following response:
+
+```json
+ get_token_usage(from: "2026-08-01", until: "2026-08-01")
+    {
+      "total_requests": 12,
+      "total_tokens": 10450,
+      "total_prompt_tokens": 8200,
+      "total_completion_tokens": 2250,
+      "period": {
+        "from": "2026-08-01",
+        "until": "2026-08-01"
+      },
+      "by_model": {
+        "mistral-embed": {
+          "requests": 8,
+          "prompt_tokens": 6500,
+          "completion_tokens": 0,
+          "total_tokens": 6500
+        },
+        "mistral-small-latest": {
+          "requests": 4,
+          "prompt_tokens": 1700,
+          "completion_tokens": 2250,
+          "total_tokens": 3950
+        }
+      }
+    }
+  ```
+
 ### Optional: Litestream replication
 
 Replicate your SQLite database to cloud storage (S3, B2, etc.) for backup and portability.
 
 1. Install [Litestream](https://litestream.io/install/)
 2. Configure replication for `DATABASE_PATH`
+
+### MIsc: Knowledge Decision taxonomy
+
+| Action | When | What happens |
+| ----------- | ------------------------------------------------------- | --------------------------------------- |
+| **create** | No similar neighbors (similarity < 0.7) | New entry |
+| **discard** | Too similar (> 0.9), no additional value | Do nothing |
+| **append** | Similar neighbor, new info adds value | Concatenate to existing content |
+| **merge** | Overlapping but complementary info | Synthesize old + new into one entry |
+| **replace** | Old info is factually wrong/superseded | Replace content of existing entry |
+| **deprecate** | Neighbor is outdated by new info | Mark old as `outdated=true` |
 
 ## Example
 
