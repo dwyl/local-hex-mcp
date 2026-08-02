@@ -61,13 +61,16 @@ mix compile
 {
   "mcpServers": {
     "hex_local": {
-      "command": "mix",
-      "args": ["mcp.server", "--no-compile"],
-      "cwd": "/absolute/path/to/stdio",
+      "command": "sh",
+      "args": [
+        "-c",
+        "cd /absolute/path/to/local_hex_mcp && exec /opt/homebrew/bin/mix mcp.server --no-compile"
+      ],
       "env": {
         "MIX_ENV": "prod",
         "MISTRAL_API_KEY": "your-key-here",
-        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
       }
     }
   }
@@ -163,6 +166,9 @@ but by using the Boruta package with Phoenix Plug"
 
 If not already digested in the database, the packages `anubis_mcp` and `boruta` will by downloaded, chunked and embedded into the SQLite database.
 The MCP tool will then run a hybrid FST+similarity search and send a response digested by the Code assistant:
+
+<details>
+<summary>Results:</summary>
 
 ```markdown
   ──────
@@ -263,3 +269,5 @@ The MCP tool will then run a hybrid FST+similarity search and send a response di
   AccessToken.authorize/1.
   4. Execution: Anubis.Server.Transport.StreamableHTTP.Plug executes the MCP tool call and streams responses back over HTTP/SSE.
   ```
+
+</details>
