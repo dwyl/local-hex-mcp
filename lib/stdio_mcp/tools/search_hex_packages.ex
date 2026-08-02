@@ -6,14 +6,17 @@ defmodule StdioMcp.Tools.SearchHexPackages do
   alias Anubis.Server.Response
 
   schema do
-    field(:query, :string, required: true, description: "Search query for Hex.pm package names or descriptions.")
+    field(:query, :string,
+      required: true,
+      description: "Search query for Hex.pm package names or descriptions."
+    )
   end
 
   @impl true
   def execute(%{query: query}, frame) do
     url = "https://hex.pm/api/packages?search=#{URI.encode(query)}&sort=downloads"
 
-    case Req.get(url, headers: [{"user-agent", "stdio_mcp/1.0"}], finch: StdioMcp.Finch) do
+    case Req.get(url, headers: [{"user-agent", "stdio_mcp/1.0"}], finch: [name: StdioMcp.Finch]) do
       {:ok, %{status: 200, body: packages}} when is_list(packages) ->
         results =
           packages

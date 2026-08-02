@@ -1,8 +1,9 @@
 defmodule StdioMcp.Docs.IngestionWorker do
   @moduledoc "Ported HexDocs worker supporting sidebarNodes, search_data, and TextChunker for SQLite."
   import Ecto.Query
-  alias StdioMcp.{PackageDoc, Repo}
   alias StdioMcp.AI.Client
+  alias StdioMcp.PackageDoc
+  alias StdioMcp.Repo
   require Logger
 
   def ingest(package, version \\ "latest") when is_binary(package) do
@@ -29,29 +30,36 @@ defmodule StdioMcp.Docs.IngestionWorker do
           ingest_search_data(search_data, canonical, resolved_version, docs_url)
 
         {:error, _reason} when docs_url != nil ->
-          # Latest version has no docs — check what version hexdocs actually serves
-          case detect_served_version(docs_url) do
-            {:ok, served_version} when served_version != resolved_version ->
-              Logger.info(
-                "[IngestionWorker] no docs for #{canonical} v#{resolved_version}, " <>
-                  "falling back to served v#{served_version}"
-              )
-
-              case fetch_search_data(canonical, served_version) do
-                {:ok, search_data} ->
-                  ingest_search_data(search_data, canonical, served_version, docs_url)
-
-                error ->
-                  error
-              end
-
-            _ ->
-              {:error, {:no_docs, resolved_version}}
-          end
+          ingest_served_version(canonical, resolved_version, docs_url)
 
         error ->
           error
       end
+    end
+  end
+
+  # The latest release may have no published docs. HexDocs still serves an
+  # earlier version, so ask which one and retry against that before giving up.
+  defp ingest_served_version(canonical, resolved_version, docs_url) do
+    case detect_served_version(docs_url) do
+      {:ok, served_version} when served_version != resolved_version ->
+        retry_with_version(canonical, resolved_version, served_version, docs_url)
+
+      _ ->
+        {:error, {:no_docs, resolved_version}}
+    end
+  end
+
+  defp retry_with_version(canonical, resolved_version, served_version, docs_url) do
+    Logger.info(
+      "[IngestionWorker] no docs for #{canonical} v#{resolved_version}, " <>
+        "falling back to served v#{served_version}"
+    )
+
+    # A bare `with` returns the unmatched value, preserving the fetch error
+    # rather than flattening it into {:no_docs, _}.
+    with {:ok, search_data} <- fetch_search_data(canonical, served_version) do
+      ingest_search_data(search_data, canonical, served_version, docs_url)
     end
   end
 
@@ -315,34 +323,16 @@ defmodule StdioMcp.Docs.IngestionWorker do
     type = to_string(Map.get(item, "type", "doc"))
     hexdocs_url = "#{base_url}/#{ref}"
 
-    content =
-      cond do
-        # Already has real content (from searchData/searchNodes format)
-        doc_text != "" and doc_text != title and String.length(doc_text) > String.length(title) ->
-          doc_text
-
-        # Thin content — fetch from the actual HexDocs page
-        true ->
-          fetched = fetch_doc_content(hexdocs_url)
-          if fetched != "", do: fetched, else: doc_text
-      end
+    content = resolve_content(doc_text, title, hexdocs_url)
 
     if content != "" || title != "" do
       chunks = chunk_content(content)
+      multi_part? = match?([_, _ | _], chunks)
+
+      item_meta = %{ref: ref, title: title, type: type, url: hexdocs_url}
 
       Enum.with_index(chunks, fn chunk, idx ->
-        suffix = if length(chunks) > 1, do: " - Part #{idx + 1}", else: ""
-
-        %{
-          doc_type: type,
-          module: extract_module(ref, title),
-          function: extract_function(title, type),
-          signature: "#{title}#{suffix}",
-          content: chunk,
-          code_snippet: extract_first_code_snippet(chunk),
-          hexdocs_url: hexdocs_url,
-          embedding: nil
-        }
+        build_chunk_item(chunk, idx, multi_part?, item_meta)
       end)
     else
       []
@@ -350,6 +340,41 @@ defmodule StdioMcp.Docs.IngestionWorker do
   end
 
   def build_doc_items(_package, _version, _base_url, _item), do: []
+
+  # A doc entry may be split into several chunks; only then does a chunk get a
+  # "Part N" suffix, so a single-chunk entry keeps its original signature.
+  defp build_chunk_item(chunk, idx, multi_part?, meta) do
+    suffix = if multi_part?, do: " - Part #{idx + 1}", else: ""
+
+    %{
+      doc_type: meta.type,
+      module: extract_module(meta.ref, meta.title),
+      function: extract_function(meta.title, meta.type),
+      signature: "#{meta.title}#{suffix}",
+      content: chunk,
+      code_snippet: extract_first_code_snippet(chunk),
+      hexdocs_url: meta.url,
+      embedding: nil
+    }
+  end
+
+  # searchData/searchNodes entries sometimes carry real documentation and
+  # sometimes only echo the title; in the latter case the page itself is the
+  # only source of content.
+  defp resolve_content(doc_text, title, hexdocs_url) do
+    if real_content?(doc_text, title) do
+      doc_text
+    else
+      case fetch_doc_content(hexdocs_url) do
+        "" -> doc_text
+        fetched -> fetched
+      end
+    end
+  end
+
+  defp real_content?(doc_text, title) do
+    doc_text != "" and doc_text != title and String.length(doc_text) > String.length(title)
+  end
 
   defp chunk_content(text) do
     case TextChunker.split(text, format: :markdown, target_chunk_size: 400) do
@@ -360,21 +385,21 @@ defmodule StdioMcp.Docs.IngestionWorker do
 
   defp fetch_doc_content(url) do
     {page_url, anchor} = split_url_anchor(url)
-    html = cached_fetch_page(page_url)
 
-    if html != "" do
-      full_text = extract_text_from_html(html)
+    case cached_fetch_page(page_url) do
+      "" -> ""
+      html -> extract_for_anchor(html, anchor)
+    end
+  end
 
-      if anchor != nil do
-        case extract_section_by_anchor(html, anchor) do
-          section when section != "" -> section
-          _ -> full_text
-        end
-      else
-        full_text
-      end
-    else
-      ""
+  # With an anchor, prefer just that section of the page; fall back to the whole
+  # page when the anchor yields nothing.
+  defp extract_for_anchor(html, nil), do: extract_text_from_html(html)
+
+  defp extract_for_anchor(html, anchor) do
+    case extract_section_by_anchor(html, anchor) do
+      "" -> extract_text_from_html(html)
+      section -> section
     end
   end
 

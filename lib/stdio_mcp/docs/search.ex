@@ -2,8 +2,9 @@ defmodule StdioMcp.Docs.Search do
   @moduledoc "Hybrid FTS5 + sqlite-vec vector search over package docs."
   import Ecto.Query
   import SqliteVec.Ecto.Query
-  alias StdioMcp.{PackageDoc, Repo}
   alias StdioMcp.Docs.IngestionWorker
+  alias StdioMcp.PackageDoc
+  alias StdioMcp.Repo
   require Logger
 
   def search(query, opts \\ []) when is_binary(query) do
@@ -130,39 +131,61 @@ defmodule StdioMcp.Docs.Search do
   end
 
   defp maybe_auto_ingest(package, refresh, version) do
-    target_version = if is_binary(version) and version != "", do: version, else: "latest"
+    target_version = normalize_version(version)
 
-    # Check existence without version filter when "latest" — docs are stored with resolved version
-    exists? =
-      if target_version == "latest" do
-        Repo.exists?(from(d in PackageDoc, where: d.package == ^package))
-      else
-        Repo.exists?(
-          from(d in PackageDoc, where: d.package == ^package and d.version == ^target_version)
-        )
-      end
-
-    if not refresh and exists? do
+    if not refresh and already_ingested?(package, target_version) do
       []
     else
       Logger.info("[Docs.Search] auto-ingesting docs for package: #{package} (#{target_version})")
-
-      task =
-        Task.Supervisor.async_nolink(StdioMcp.TaskSupervisor, fn ->
-          IngestionWorker.ingest(package, target_version)
-        end)
-
-      case Task.yield(task, 15_000) || Task.shutdown(task) do
-        {:ok, {:ok, count}} ->
-          Logger.info("[Docs.Search] Ingested #{count} docs for #{package}")
-          []
-
-        {:ok, {:error, reason}} ->
-          ["Docs for '#{package}' ingestion issue: #{inspect(reason)}."]
-
-        nil ->
-          ["Docs for '#{package}' still ingesting — try again shortly."]
-      end
+      run_ingestion(package, target_version)
     end
+  end
+
+  defp normalize_version(version) when is_binary(version) and version != "", do: version
+  defp normalize_version(_version), do: "latest"
+
+  # Docs are stored under the resolved version, so "latest" can never match a
+  # stored value; the presence of any row for the package is the real test.
+  defp already_ingested?(package, "latest") do
+    Repo.exists?(from(d in PackageDoc, where: d.package == ^package))
+  end
+
+  defp already_ingested?(package, version) do
+    Repo.exists?(from(d in PackageDoc, where: d.package == ^package and d.version == ^version))
+  end
+
+  defp run_ingestion(package, target_version) do
+    task =
+      Task.Supervisor.async_nolink(StdioMcp.TaskSupervisor, fn ->
+        IngestionWorker.ingest(package, target_version)
+      end)
+
+    result = Task.yield(task, 15_000) || Task.shutdown(task)
+    handle_ingest_result(result, package)
+  end
+
+  # `ingest/2` reports success in two shapes: {:ok, count, version} from the
+  # search-data path and {:ok, count} from the single-page fallback. Only the
+  # second was matched, so a successful ingest via the main path raised
+  # CaseClauseError *after* writing the rows — the caller saw a failure for work
+  # that had actually succeeded, and only a retry appeared to work.
+  defp handle_ingest_result({:ok, {:ok, count, _version}}, package),
+    do: log_ingested(count, package)
+
+  defp handle_ingest_result({:ok, {:ok, count}}, package),
+    do: log_ingested(count, package)
+
+  defp handle_ingest_result({:ok, {:error, reason}}, package),
+    do: ["Docs for '#{package}' ingestion issue: #{inspect(reason)}."]
+
+  defp handle_ingest_result(nil, package),
+    do: ["Docs for '#{package}' still ingesting — try again shortly."]
+
+  defp handle_ingest_result(other, package),
+    do: ["Docs for '#{package}' ingestion returned an unexpected result: #{inspect(other)}."]
+
+  defp log_ingested(count, package) do
+    Logger.info("[Docs.Search] Ingested #{count} docs for #{package}")
+    []
   end
 end

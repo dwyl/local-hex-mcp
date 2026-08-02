@@ -25,3 +25,36 @@
 - **`search_hex_packages`**: Search Hex.pm package names, descriptions, and download stats.
 
 - **`search_github_issues`**: Search open/closed GitHub issues and PRs within an organization (e.g. `org: "phoenixframework"`).
+
+## Running the server (`.mcp.json`)
+
+Launch `mix mcp.server` through a shell that changes directory first — in this repo's own
+`.mcp.json` and in every other repo that registers this server:
+
+```json
+"hex_local": {
+  "command": "sh",
+  "args": ["-c", "cd /absolute/path/to/local_hex_mcp && exec /opt/homebrew/bin/mix mcp.server --no-compile"],
+  "env": {
+    "MIX_ENV": "prod",
+    "MISTRAL_API_KEY": "…",
+    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
+  }
+}
+```
+
+A bare `"command": "mix"` is not portable, and a `"cwd"` key does not fix it:
+
+- Claude Code's `.mcp.json` has no `cwd` field — it is ignored, and the server inherits the
+  directory Claude was launched from.
+- `mix` does not walk up to find `mix.exs`; it needs one in the current directory.
+
+Launched from another project (or from a subdirectory of this one), Mix loads the wrong project,
+`mcp.server` is not found, the process exits, and Claude Code reports only `-32000`. `exec` keeps
+the BEAM as the shell's own process so the client's process management still reaches it.
+
+**After cloning or forking, update the `cd` target and `DATABASE_PATH` to the new checkout path.**
+A wrong `DATABASE_PATH` does not fail loudly: the server starts, tools list, and every query
+returns `no such table: package_docs` — currently wrapped in `isError: false`, so the session
+looks healthy while reading an empty database.

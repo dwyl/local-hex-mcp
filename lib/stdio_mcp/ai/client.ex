@@ -56,23 +56,9 @@ defmodule StdioMcp.AI.Client do
 
       body = %{model: model, input: texts}
 
-      case Req.post(url, json: body, headers: headers, finch: StdioMcp.Finch) do
+      case Req.post(url, json: body, headers: headers, finch: [name: StdioMcp.Finch]) do
         {:ok, %{status: 200, body: %{"data" => data} = resp_body}} ->
-          if usage = resp_body["usage"] do
-            :telemetry.execute(
-              [:stdio_mcp, :ai, :token_usage],
-              %{
-                prompt_tokens: usage["prompt_tokens"] || usage["total_tokens"] || 0,
-                completion_tokens: 0,
-                total_tokens: usage["total_tokens"] || 0
-              },
-              %{
-                model: model,
-                type: :embedding
-              }
-            )
-          end
-
+          emit_usage(resp_body["usage"], model, :embedding)
           vectors = Enum.map(data, & &1["embedding"])
           {:ok, vectors}
 
@@ -103,25 +89,13 @@ defmodule StdioMcp.AI.Client do
         {"content-type", "application/json"}
       ]
 
-      body = %{model: model, messages: messages, temperature: 0.2}
+      body =
+        %{model: model, messages: messages, temperature: 0.2}
+        |> maybe_json_mode(opts)
 
-      case Req.post(url, json: body, headers: headers, finch: StdioMcp.Finch) do
+      case Req.post(url, json: body, headers: headers, finch: [name: StdioMcp.Finch]) do
         {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]} = resp_body}} ->
-          if usage = resp_body["usage"] do
-            :telemetry.execute(
-              [:stdio_mcp, :ai, :token_usage],
-              %{
-                prompt_tokens: usage["prompt_tokens"] || 0,
-                completion_tokens: usage["completion_tokens"] || 0,
-                total_tokens: usage["total_tokens"] || 0
-              },
-              %{
-                model: model,
-                type: :chat
-              }
-            )
-          end
-
+          emit_usage(resp_body["usage"], model, :chat)
           {:ok, msg}
 
         {:ok, %{status: status, body: err}} ->
@@ -131,5 +105,30 @@ defmodule StdioMcp.AI.Client do
           {:error, reason}
       end
     end
+  end
+
+  # Both knowledge-base prompts ask for JSON and previously relied on stripping
+  # markdown fences from prose, which let the model return a differently shaped
+  # payload without failing.
+  defp maybe_json_mode(body, opts) do
+    if Keyword.get(opts, :json, false) do
+      Map.put(body, :response_format, %{type: "json_object"})
+    else
+      body
+    end
+  end
+
+  defp emit_usage(nil, _model, _type), do: :ok
+
+  defp emit_usage(usage, model, type) do
+    :telemetry.execute(
+      [:stdio_mcp, :ai, :token_usage],
+      %{
+        prompt_tokens: usage["prompt_tokens"] || usage["total_tokens"] || 0,
+        completion_tokens: usage["completion_tokens"] || 0,
+        total_tokens: usage["total_tokens"] || 0
+      },
+      %{model: model, type: type}
+    )
   end
 end

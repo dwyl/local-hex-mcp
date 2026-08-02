@@ -6,8 +6,16 @@ defmodule StdioMcp.Tools.SearchGithubIssues do
   alias Anubis.Server.Response
 
   schema do
-    field(:org, :string, required: true, description: "GitHub organization or user account name (e.g. 'phoenixframework', 'elixir-ecto').")
-    field(:query, :string, required: true, description: "Search query for issue titles or content.")
+    field(:org, :string,
+      required: true,
+      description:
+        "GitHub organization or user account name (e.g. 'phoenixframework', 'elixir-ecto')."
+    )
+
+    field(:query, :string,
+      required: true,
+      description: "Search query for issue titles or content."
+    )
   end
 
   @impl true
@@ -21,7 +29,7 @@ defmodule StdioMcp.Tools.SearchGithubIssues do
     q = "#{query} org:#{org} is:issue"
     url = "https://api.github.com/search/issues?q=#{URI.encode(q)}&per_page=10"
 
-    case Req.get(url, headers: headers, finch: StdioMcp.Finch) do
+    case Req.get(url, headers: headers, finch: [name: StdioMcp.Finch]) do
       {:ok, %{status: 200, body: %{"items" => items}}} ->
         results =
           Enum.map(items, fn i ->

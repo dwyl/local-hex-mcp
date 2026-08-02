@@ -7,10 +7,44 @@ defmodule StdioMcp.Tools.GetTokenUsage do
   alias StdioMcp.{Repo, TokenUsageLog}
 
   schema do
-    field(:model, :string, description: "Optional filter by model name (e.g. 'mistral-embed', 'mistral-small-latest').")
-    field(:from, :string, description: "Optional start date filter (YYYY-MM-DD or ISO8601 string, e.g. '2026-08-01').")
-    field(:until, :string, description: "Optional end date filter (YYYY-MM-DD or ISO8601 string, e.g. '2026-08-31').")
+    field(:model, :string,
+      description: "Optional filter by model name (e.g. 'mistral-embed', 'mistral-small-latest')."
+    )
+
+    field(:from, :string,
+      description: "Optional start date filter (YYYY-MM-DD or ISO8601 string, e.g. '2026-08-01')."
+    )
+
+    field(:until, :string,
+      description: "Optional end date filter (YYYY-MM-DD or ISO8601 string, e.g. '2026-08-31')."
+    )
   end
+
+  defp filter_by_model(query, model) when is_binary(model) and model != "" do
+    from(t in query, where: t.model == ^model)
+  end
+
+  defp filter_by_model(query, _model), do: query
+
+  # An unparseable date is ignored rather than rejected: the filter is a
+  # convenience and a bad value should not fail the whole query.
+  defp filter_from(query, value) when is_binary(value) and value != "" do
+    case parse_date_start(value) do
+      {:ok, dt} -> from(t in query, where: t.inserted_at >= ^dt)
+      _ -> query
+    end
+  end
+
+  defp filter_from(query, _value), do: query
+
+  defp filter_until(query, value) when is_binary(value) and value != "" do
+    case parse_date_end(value) do
+      {:ok, dt} -> from(t in query, where: t.inserted_at <= ^dt)
+      _ -> query
+    end
+  end
+
+  defp filter_until(query, _value), do: query
 
   @impl true
   def execute(params, frame) do
@@ -18,36 +52,12 @@ defmodule StdioMcp.Tools.GetTokenUsage do
     from_filter = params[:from]
     until_filter = params[:until]
 
-    query = from t in TokenUsageLog, select: t
-
-    query =
-      if model_filter && model_filter != "" do
-        from t in query, where: t.model == ^model_filter
-      else
-        query
-      end
-
-    query =
-      if from_filter && from_filter != "" do
-        case parse_date_start(from_filter) do
-          {:ok, dt} -> from t in query, where: t.inserted_at >= ^dt
-          _ -> query
-        end
-      else
-        query
-      end
-
-    query =
-      if until_filter && until_filter != "" do
-        case parse_date_end(until_filter) do
-          {:ok, dt} -> from t in query, where: t.inserted_at <= ^dt
-          _ -> query
-        end
-      else
-        query
-      end
-
-    logs = Repo.all(query)
+    logs =
+      from(t in TokenUsageLog, select: t)
+      |> filter_by_model(model_filter)
+      |> filter_from(from_filter)
+      |> filter_until(until_filter)
+      |> Repo.all()
 
     total_prompt = Enum.sum_by(logs, & &1.prompt_tokens)
     total_completion = Enum.sum_by(logs, & &1.completion_tokens)
@@ -81,7 +91,8 @@ defmodule StdioMcp.Tools.GetTokenUsage do
     {:reply, Response.text(Response.tool(), Jason.encode!(result)), frame}
   rescue
     e ->
-      {:reply, Response.text(Response.tool(), "Get token usage failed: #{Exception.message(e)}"), frame}
+      {:reply, Response.text(Response.tool(), "Get token usage failed: #{Exception.message(e)}"),
+       frame}
   end
 
   defp parse_date_start(str) do

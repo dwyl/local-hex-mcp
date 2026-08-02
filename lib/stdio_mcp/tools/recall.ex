@@ -4,19 +4,29 @@ defmodule StdioMcp.Tools.Recall do
   use Anubis.Server.Component, type: :tool
 
   alias Anubis.Server.Response
+  alias StdioMcp.Knowledge.Vocabulary
   alias StdioMcp.Memory
 
   schema do
-    field(:query, :string, required: true, description: "Search query for past architectural decisions, solved issues, or lessons learned.")
-    field(:kind, :string, description: "Filter by memory kind: 'pain_point', 'architecture', 'best_practice', or 'quirk'.")
-    field(:domain, :string, description: "Filter by domain: 'phoenix', 'ecto', 'liveview', 'mcp', 'oauth', 'beam'.")
-    field(:package, :string, description: "Filter by library or package name (e.g. 'anubis_mcp', 'boruta', 'req').")
+    field(:query, :string,
+      required: true,
+      description:
+        "Search query for past architectural decisions, solved issues, or lessons learned."
+    )
+
+    # Derived from the vocabulary: this schema previously advertised filter
+    # values the writer never emitted, so every filtered search returned nothing.
+    field(:kind, :string, description: Vocabulary.kinds_for_schema())
+
+    field(:package, :string,
+      description: "Filter by library or package name (e.g. 'anubis_mcp', 'boruta', 'req')."
+    )
   end
 
   @impl true
   def execute(params, frame) do
     query = params[:query]
-    opts = [limit: 5, kind: params[:kind], domain: params[:domain], package: params[:package]]
+    opts = [limit: 5, kind: params[:kind], package: params[:package]]
 
     results = Memory.search(query, opts)
 

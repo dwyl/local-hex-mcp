@@ -8,7 +8,8 @@
         "MIX_ENV": "prod",
         "MIX_QUIET": "1",
         "MISTRAL_API_KEY": "your-mistral-api-key",
-        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "DATABASE_PATH": "your-path"
       }
     }
   }
