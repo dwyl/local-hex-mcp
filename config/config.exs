@@ -3,6 +3,7 @@ import Config
 config :stdio_mcp,
   ecto_repos: [StdioMcp.Repo]
 
+# source: https://micrologics.org/blog/sqlite-in-production-optimizing-wal-mode-concurrency-and-vfs-layers-for-low-latency-app-servers
 config :stdio_mcp, StdioMcp.Repo,
   database: Path.expand("../priv/mcp.db", __DIR__),
   pool_size: 5,
