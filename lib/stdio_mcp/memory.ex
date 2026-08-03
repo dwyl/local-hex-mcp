@@ -7,6 +7,7 @@ defmodule StdioMcp.Memory do
   alias StdioMcp.AI.Client
   alias StdioMcp.Knowledge
   alias StdioMcp.Knowledge.Decision
+  alias StdioMcp.Knowledge.Schemas
   alias StdioMcp.Knowledge.Vocabulary
   alias StdioMcp.Repo
   require Logger
@@ -243,14 +244,16 @@ defmodule StdioMcp.Memory do
   # cleared the floor. Recording it separately is what makes the floor itself
   # measurable rather than a guess.
   defp decide(text, []) do
-    {:ok, %{action: "create", content: text, curated: false}}
+    with {:ok, structured} <- structure_text(text) do
+      {:ok, %{action: "create", content: text, structured: structured, curated: false}}
+    end
   end
 
   defp decide(text, neighbors) do
     close = Enum.filter(neighbors, fn n -> 1.0 - n.distance >= @similarity_threshold end)
 
     if close == [] do
-      {:ok, %{action: "create", content: text, curated: false}}
+      decide(text, [])
     else
       with {:ok, decision} <- ask_mistral(text, close) do
         {:ok, Map.put(decision, :curated, true)}
@@ -267,13 +270,13 @@ defmodule StdioMcp.Memory do
 
     prompt = """
     You are a knowledge base curator. A new learning is being saved. Similar entries already exist.
+
+    Goal: Determine the appropriate reconciliation action to maintain a clean, non-redundant and accurate knowledge base.
+
     Today's date: #{Date.utc_today()}.
 
-    NEW LEARNING:
-    #{text}
 
-    EXISTING ENTRIES (each shows its measured similarity to the new learning):
-    #{existing}
+    ### RECONCILIATION WORKFLOW (Evaluate in order)
 
     Work through the two steps in order. STEP 1 takes precedence over STEP 2.
 
@@ -292,28 +295,28 @@ defmodule StdioMcp.Memory do
       - similarity between #{@similarity_threshold} and #{@duplicate_threshold}, both hold partial truths that belong together -> "merge"
       - the topic is genuinely different despite embedding proximity -> "create"
 
-    Additional rules:
+    ### Additional domain rules:
     - **Package versions**: a fix for library v1 may not apply to v2. If versions differ, prefer "create" to keep both.
     - **API changes**: if behaviour changed between versions, the old entry is still valid for its version — prefer "append" or "create".
     - **Preserve prior learnings**: outside of STEP 1, never drop information. "append" and "merge" must carry over the existing content.
     - **Preserve structure**: if either the new learning or the neighbour states a symptom, a root cause or a fix, the content you return must still state them. Merging must not silently drop these.
     - **One topic per entry**: if the new learning is about a different subject than the neighbour, choose "create" rather than attaching it to an unrelated entry.
 
-    Return ONLY valid JSON, one of:
-    1. {"action": "create", "content": "<the new learning text>"}
-    2. {"action": "discard"}
-    3. {"action": "update", "id": <id>, "strategy": "append", "content": "<old content + new details>"}
-    4. {"action": "update", "id": <id>, "strategy": "merge", "content": "<synthesized old + new>"}
-    5. {"action": "update", "id": <id>, "strategy": "replace", "content": "<new content>"}
-    6. {"action": "deprecate", "id": <id>, "reason": "<why the entry is obsolete>"}
+    The response shape is fixed by the schema attached to this request; every field
+    carries its own description there. Reason through the workflow above before
+    committing to an action.
 
-    The final content must be self-contained. Write prose only: do not embed JSON metadata
-    blobs or "Last updated" footers into the content field.
+    NEW LEARNING:
+    #{text}
+
+    EXISTING ENTRIES (each shows its measured similarity to the new learning):
+    #{existing}
     """
 
     case Client.chat([%{role: "user", content: prompt}], [],
            model: Client.large_model(),
-           json: true
+           json_schema: Schemas.curation(),
+           schema_name: "curation_decision"
          ) do
       {:ok, %{"content" => content}} -> parse_decision(content, text)
       {:error, _} = err -> err
@@ -372,31 +375,39 @@ defmodule StdioMcp.Memory do
         {:ok, %{action: "discard"}}
 
       {:ok, %{"action" => "update", "id" => id, "content" => merged} = p} ->
-        resolve_update(parse_id(id), merged, p["strategy"] || "merge")
+        structured = build_structured_from_parsed(merged, p)
+        resolve_update(parse_id(id), merged, p["strategy"] || "merge", structured)
 
-      # Previously missing: the prompt offers "deprecate" as option 6, but with
-      # no clause for it the response fell through to the catch-all and became a
-      # "create". Soft-deprecation could never fire, so superseded entries
-      # stayed live alongside their replacements.
       {:ok, %{"action" => "deprecate", "id" => id} = p} ->
         resolve_deprecate(parse_id(id), p["reason"], original_text)
 
-      {:ok, %{"action" => "create", "content" => new_c}} ->
-        {:ok, %{action: "create", content: new_c}}
+      {:ok, %{"action" => "create", "content" => new_c} = p} ->
+        structured = build_structured_from_parsed(new_c, p)
+        {:ok, %{action: "create", content: new_c, structured: structured}}
 
       _ ->
         {:ok, %{action: "create", content: original_text}}
     end
   end
 
-  # An unusable id falls back to creating a new entry rather than failing: the
-  # submission is still worth keeping, it just cannot be attached to a target.
-  defp resolve_update({:ok, id}, merged, strategy) do
-    {:ok, %{action: "update", id: id, content: merged, strategy: strategy}}
+  defp build_structured_from_parsed(text, parsed) when is_map(parsed) do
+    metadata = extract_metadata(parsed)
+
+    %{
+      kind: normalize_kind(parsed["kind"], metadata),
+      title: parsed["title"] || String.slice(text, 0, 80),
+      content: text,
+      metadata: metadata
+    }
   end
 
-  defp resolve_update(:error, merged, _strategy) do
-    {:ok, %{action: "create", content: merged}}
+  defp resolve_update({:ok, id}, merged, strategy, structured) do
+    {:ok,
+     %{action: "update", id: id, content: merged, strategy: strategy, structured: structured}}
+  end
+
+  defp resolve_update(:error, merged, _strategy, structured) do
+    {:ok, %{action: "create", content: merged, structured: structured}}
   end
 
   defp resolve_deprecate({:ok, id}, reason, original_text) do
@@ -447,13 +458,18 @@ defmodule StdioMcp.Memory do
   end
 
   defp apply_decision(decision) do
-    with {:ok, structured} <- structure_text(decision.content),
+    with {:ok, structured} <- fetch_or_structure_text(decision),
          {:ok, final_embedding} <- Client.embed(decision.content) do
       result = execute_decision(decision, structured, final_embedding)
       title = Map.get(result, :title, "n/a")
       {:ok, Map.put(result, :detail, "#{result.action} — #{title}")}
     end
   end
+
+  defp fetch_or_structure_text(%{structured: structured}) when is_map(structured),
+    do: {:ok, structured}
+
+  defp fetch_or_structure_text(decision), do: structure_text(decision.content)
 
   defp execute_decision(%{action: "create"}, structured, embedding) do
     {:ok, entry} = save(Map.put(structured, :embedding, Jason.encode!(embedding)))
@@ -475,24 +491,17 @@ defmodule StdioMcp.Memory do
 
   defp structure_text(text) do
     prompt = """
-    Extract structured fields from this technical learning. Return ONLY valid JSON:
-    - "title": short summary (max 80 chars)
-    - "kind": exactly one of the following. Choose the closest match; there is no generic option.
-    #{Vocabulary.kinds_for_prompt()}
-    - "stack": list of technologies, lowercase and hyphenated (e.g. ["elixir", "phoenix", "caddy", "claude-code"])
-    - "symptom": error observed (or null)
-    - "cause": root cause (or null)
-    - "fix": resolution (or null)
-    - "package": hex.pm package name (or null)
-    - "package_version": version or version constraint (e.g. "~> 0.3"), or null
-    - "repo": GitHub repo (e.g. "phoenixframework/phoenix"), or null
+    Extract the structured fields describing this technical learning. The response
+    shape is fixed by the schema attached to this request and every field carries
+    its own description there.
 
     Text: #{text}
     """
 
     case Client.chat([%{role: "user", content: prompt}], [],
            model: Client.small_model(),
-           json: true
+           json_schema: Schemas.structuring(),
+           schema_name: "structured_learning"
          ) do
       {:ok, %{"content" => content}} ->
         case Jason.decode(clean_json(content)) do

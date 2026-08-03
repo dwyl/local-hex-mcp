@@ -1,7 +1,13 @@
 # Curator harness — exercises every action the knowledge-base curator can take.
 #
-#   mix run scripts/curator_harness.exs             # resets the knowledge table first
-#   mix run scripts/curator_harness.exs --no-reset  # run against existing state
+#   mix run scripts/curator_harness.exs               # resets the knowledge table first
+#   mix run scripts/curator_harness.exs --no-reset    # run against existing state
+#   mix run scripts/curator_harness.exs --pause 2000  # ms between cases (default 1500)
+#
+# Each case costs several API calls (embed, curator, re-embed), so a full run
+# fires roughly fifteen in quick succession and reliably trips Mistral's rate
+# limit on the last case or two. The pause spaces them out; a 429 is also
+# retried once, since losing the final case wastes the whole run.
 #
 # Cases run in order and depend on each other's state: `discard` needs its
 # target already stored, `replace` needs something to correct. Each submission
@@ -16,8 +22,9 @@
 import Ecto.Query, only: [from: 2]
 alias StdioMcp.Memory
 
-{opts, _, _} = OptionParser.parse(System.argv(), strict: [reset: :boolean])
+{opts, _, _} = OptionParser.parse(System.argv(), strict: [reset: :boolean, pause: :integer])
 reset? = Keyword.get(opts, :reset, true)
+pause_ms = Keyword.get(opts, :pause, 1_500)
 
 unless StdioMcp.AI.Client.memory_enabled?() do
   IO.puts(:stderr, "AI_API_KEY / MISTRAL_API_KEY not set — curation is disabled, aborting.")
@@ -161,21 +168,50 @@ defmodule Harness do
   end
 end
 
+rate_limited? = fn
+  %{status: "failed", detail: detail} when is_binary(detail) -> detail =~ "429"
+  _ -> false
+end
+
+submit = fn text, tag ->
+  request_id = "harness-#{System.system_time(:millisecond)}-#{tag}"
+  {:ok, _} = Memory.open_decision(request_id, text)
+  Memory.process_remember(text, request_id)
+
+  case Memory.get_decision(request_id) do
+    {:ok, d} -> d
+    {:error, _} -> nil
+  end
+end
+
 results =
   cases
   |> Enum.with_index(1)
   |> Enum.map(fn {c, i} ->
-    request_id = "harness-#{System.system_time(:second)}-#{i}"
-    {:ok, _} = Memory.open_decision(request_id, c.text)
-    Memory.process_remember(c.text, request_id)
+    if i > 1, do: Process.sleep(pause_ms)
 
-    case Memory.get_decision(request_id) do
-      {:ok, d} ->
+    decision =
+      case submit.(c.text, i) do
+        d when d != nil ->
+          if rate_limited?.(d),
+            do:
+              (
+                Process.sleep(20_000)
+                submit.(c.text, "#{i}r")
+              ),
+            else: d
+
+        nil ->
+          nil
+      end
+
+    case decision do
+      nil ->
+        Map.merge(c, %{got: "NO RECORD", decision: nil, ok: false})
+
+      d ->
         got = Harness.effective(d)
         Map.merge(c, %{got: got, decision: d, ok: got in c.expect})
-
-      {:error, _} ->
-        Map.merge(c, %{got: "NO RECORD", decision: nil, ok: false})
     end
   end)
 

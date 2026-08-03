@@ -2,6 +2,7 @@ erl_crash.dump
 _build/
 .expert/
 .claude/
+.agents/
 deps/
 priv/mcp.*
 .mcp.json

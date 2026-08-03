@@ -19,6 +19,17 @@ A lightweight Elixir MCP server designed to run over `stdio` transport.
  | recall                                                      | Yes (embed)                                                | No |
  |  remember                                                    | Yes (embed)                                                | Yes (small & large for taxonomy & deduplication)|
 
+<details>
+<summary>Example of models</summary>
+
+|Model|Mistral / cost|OpenAI /cost|Gemini /cost|
+|--|--|--|--|
+|Embeddings|mistral-embed 0.1 /M|txt-embedding-3-small 0.02 /M|text-embedding-004 0.025 /M|
+|Fast extraction|mistral-small-4 0.15/0.60|GPT-5-nano 0.05,0.40 /M|gemini-2.5-flash-lite 0.10,0.40 /M|
+|Classification|mistral-large-3 0.50/1.50|GPT-5-mini 0.25,2.00 /M|gemini-3.1-flash-lite 0.25,1.50 /M|
+
+</details>
+
 ## Features
 
 - **Hybrid search**: FTS5 broadens candidates, `vec_distance_cosine` re-ranks by semantic similarity — all in a single SQL query via sqlite-vec's native C layer.
@@ -77,7 +88,7 @@ mix compile
 }
 ```
 
-**Google Antigravity** (`.mcp_config.json`):
+**Google Antigravity** (`agents/mcp_config.json`):
 
 ```json
 {
@@ -107,7 +118,11 @@ The query:
 get_token_usage(from: "2026-08-01", until: "2026-08-01")
 ```
 
-returns a clean human-friendly Markdown summary from the following response:
+returns a clean human-friendly Markdown
+
+<details>
+
+<summary>example</summary>
 
 ```json
     {
@@ -135,6 +150,8 @@ returns a clean human-friendly Markdown summary from the following response:
       }
     }
   ```
+
+</details>  
 
 ### Optional: Litestream replication
 

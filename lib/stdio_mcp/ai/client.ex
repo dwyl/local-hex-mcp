@@ -93,7 +93,7 @@ defmodule StdioMcp.AI.Client do
         %{model: model, messages: messages, temperature: 0.2}
         |> maybe_json_mode(opts)
 
-      case Req.post(url, json: body, headers: headers, finch: [name: StdioMcp.Finch]) do
+      case Req.post(url, json: body, headers: headers, receive_timeout: 90_000, finch: [name: StdioMcp.Finch]) do
         {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]} = resp_body}} ->
           emit_usage(resp_body["usage"], model, :chat)
           {:ok, msg}
@@ -107,14 +107,25 @@ defmodule StdioMcp.AI.Client do
     end
   end
 
-  # Both knowledge-base prompts ask for JSON and previously relied on stripping
-  # markdown fences from prose, which let the model return a differently shaped
-  # payload without failing.
+  # Supports both generic JSON object mode (opts: [json: true]) and strict JSON schema mode
+  # (opts: [json_schema: schema, schema_name: "name", strict: true]).
   defp maybe_json_mode(body, opts) do
-    if Keyword.get(opts, :json, false) do
-      Map.put(body, :response_format, %{type: "json_object"})
-    else
-      body
+    cond do
+      schema = Keyword.get(opts, :json_schema) ->
+        Map.put(body, :response_format, %{
+          type: "json_schema",
+          json_schema: %{
+            name: Keyword.get(opts, :schema_name, "response_schema"),
+            strict: Keyword.get(opts, :strict, true),
+            schema: schema
+          }
+        })
+
+      Keyword.get(opts, :json, false) ->
+        Map.put(body, :response_format, %{type: "json_object"})
+
+      true ->
+        body
     end
   end
 

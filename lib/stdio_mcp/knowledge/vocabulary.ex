@@ -27,9 +27,18 @@ defmodule StdioMcp.Knowledge.Vocabulary do
   @doc "The allowed `kind` values."
   def kinds, do: @kinds
 
-  @doc "Renders the kinds with their meanings, for the structuring prompt."
-  def kinds_for_prompt do
-    Enum.map_join(@kinds, "\n", fn kind -> ~s(      - "#{kind}": #{@descriptions[kind]}) end)
+  @doc """
+  Renders the kinds with their meanings as a single line, for the `description`
+  of a JSON-schema field.
+
+  The `enum` constrains which values are legal but says nothing about what they
+  mean, and the choice between them is a judgement the model cannot make from
+  the names alone. Carrying the meanings in the schema keeps that guidance next
+  to the constraint instead of duplicated in the prompt.
+  """
+  def kinds_for_schema_description do
+    "Which kind of entry this is — " <>
+      Enum.map_join(@kinds, "; ", fn kind -> "#{kind} = #{@descriptions[kind]}" end) <> "."
   end
 
   @doc "Renders the kinds for the `recall` tool's field description."

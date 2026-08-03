@@ -6,6 +6,7 @@
   - When asked to search documentation for specific libraries or packages (e.g. `boruta`, `anubis_mcp`, `phoenix`, `plug`), **ALWAYS extract the target package name(s)** and pass it explicitly in the `package` argument (e.g. `package: "boruta"`) to trigger Hex.pm auto-ingestion into SQLite if not yet indexed.
   - **Grepping vs search_docs**: Use `grep` on `deps/` for quick function signatures of installed code. Use `search_docs` for conceptual guides, configuration patterns, code examples, or evaluating uninstalled packages.
   - **Citing Package Versions**: When referencing documentation returned by `search_docs`, **ALWAYS include the package version(s)** returned in the payload (e.g. `anubis_mcp v1.14.0`, `boruta v3.0.0-beta.4`).
+  - **No URL Extrapolation / Hallucination**: NEVER construct, guess, or extrapolate HexDocs or GitHub URLs. Only reference and output exact `hexdocs_url` links returned directly inside `search_docs` payloads or verified empirically.
 
 - **`recall`**: Search the local knowledge base for past pain points, architectural decisions, and bug fixes.
   - **Execute BEFORE fixing**:
@@ -26,10 +27,11 @@
 
 - **`search_github_issues`**: Search open/closed GitHub issues and PRs within an organization (e.g. `org: "phoenixframework"`).
 
-## Running the server (`.mcp.json`)
+## Running the server
 
-Launch `mix mcp.server` through a shell that changes directory first — in this repo's own
-`.mcp.json` and in every other repo that registers this server:
+### Claude Code (`.mcp.json`)
+
+Launch `mix mcp.server` through a shell that changes directory first:
 
 ```json
 "hex_local": {
@@ -44,17 +46,32 @@ Launch `mix mcp.server` through a shell that changes directory first — in this
 }
 ```
 
-A bare `"command": "mix"` is not portable, and a `"cwd"` key does not fix it:
+- **Claude Code**: Has no `cwd` field in `.mcp.json` — any `cwd` key is ignored, so the server inherits the directory Claude was launched from. `sh -c "cd ... && exec ..."` is required so `mix` finds `mix.exs`.
 
-- Claude Code's `.mcp.json` has no `cwd` field — it is ignored, and the server inherits the
-  directory Claude was launched from.
-- `mix` does not walk up to find `mix.exs`; it needs one in the current directory.
+### Antigravity CLI (`.agents/mcp_config.json`)
 
-Launched from another project (or from a subdirectory of this one), Mix loads the wrong project,
-`mcp.server` is not found, the process exits, and Claude Code reports only `-32000`. `exec` keeps
-the BEAM as the shell's own process so the client's process management still reaches it.
+Antigravity supports `cwd` natively:
 
-**After cloning or forking, update the `cd` target and `DATABASE_PATH` to the new checkout path.**
+```json
+"hex_local": {
+  "command": "/opt/homebrew/bin/mix",
+  "args": ["mcp.server", "--no-compile"],
+  "cwd": "/absolute/path/to/local_hex_mcp",
+  "env": {
+    "MIX_ENV": "prod",
+    "MISTRAL_API_KEY": "…",
+    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
+  }
+}
+```
+
+### Important Notes
+
+- **Mix Working Directory**: `mix` does not walk up directory trees to find `mix.exs`; it needs one in the current working directory. Launched from another project or subdirectory without changing directory first, Mix loads the wrong project and `mcp.server` is not found.
+- **`exec` in Shell Wrappers**: `exec` keeps the BEAM as the shell's own process so client process management can signal it cleanly.
+
+**After cloning or forking, update the directory path and `DATABASE_PATH` to the new checkout path.**
 A wrong `DATABASE_PATH` does not fail loudly: the server starts, tools list, and every query
 returns `no such table: package_docs` — currently wrapped in `isError: false`, so the session
 looks healthy while reading an empty database.
