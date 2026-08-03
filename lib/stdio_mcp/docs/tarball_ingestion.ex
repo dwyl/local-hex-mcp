@@ -2,14 +2,14 @@ defmodule StdioMcp.Docs.TarballIngestion do
   @moduledoc """
   Ingests a package's documentation from its Hex docs tarball.
 
-  The existing `StdioMcp.Docs.IngestionWorker` reconstructs the documentation by
-  scraping hexdocs.pm: it probes for `search_data.js` (which 404s for every
-  package tested), falls back to scraping HTML for a `sidebar_items-*.js`
-  navigation index that carries no documentation text, and then fetches one HTML
-  page per item — 761 requests for `anubis_mcp` alone.
+  Docs were previously reconstructed by scraping hexdocs.pm: probing for
+  `search_data.js` (which 404s for every package tested), falling back to
+  scraping HTML for a `sidebar_items-*.js` navigation index that carries no
+  documentation text, then fetching one HTML page per item — 761 requests for
+  `anubis_mcp` alone. All of that existed to reconstruct something Hex already
+  publishes.
 
-  All of that exists to reconstruct something Hex already publishes. The tarball
-  at `https://repo.hex.pm/docs/{package}-{version}.tar.gz` contains:
+  The tarball at `https://repo.hex.pm/docs/{package}-{version}.tar.gz` contains:
 
     * `dist/search_data-*.js` — the real search index, **with** documentation
       text. Present in every package checked, old and new: anubis_mcp 992/1272

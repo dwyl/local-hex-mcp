@@ -42,6 +42,7 @@ defmodule StdioMcp.MixProject do
       {:req, "~> 0.5"},
       {:text_chunker, "~> 0.6"},
       {:jason, "~> 1.4"},
+      {:lazy_html, "~> 0.1.12"},
       {:dialyxir, "~> 1.4", runtime: false},
       {:credo, "~> 1.7", runtime: false}
     ]
