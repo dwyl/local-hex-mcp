@@ -7,6 +7,8 @@ defmodule StdioMcp.Application do
     # Redirect Erlang logger to stderr so stdout stays completely clean for JSON-RPC
     :logger.update_handler_config(:default, :config, %{type: :standard_error})
 
+    setup_file_logging()
+
     # Attach Telemetry handler to record AI token usage into SQLite
     StdioMcp.Telemetry.attach()
 
@@ -29,6 +31,60 @@ defmodule StdioMcp.Application do
 
       other ->
         other
+    end
+  end
+
+  # Adds a file log alongside the stderr handler, enabled by MCP_LOG_FILE.
+  #
+  # Gated on an env var rather than Mix.env because .mcp.json runs the server
+  # with MIX_ENV=prod — a dev-only setting would never apply to a real session,
+  # which is precisely when stderr is discarded by the MCP client and the log is
+  # the only way to see what happened.
+  #
+  # The primary level has to be lowered too: it filters before handlers, so with
+  # the default `level: :error` no warning ever reaches a handler. Several hot
+  # paths rescue and fall back silently (run_query, ensure_ingested,
+  # maybe_auto_ingest, run_fts_knowledge), and those warnings are the point.
+  defp setup_file_logging do
+    case System.get_env("MCP_LOG_FILE") do
+      path when is_binary(path) and path != "" ->
+        level = log_level()
+        :logger.set_primary_config(:level, level)
+
+        :logger.add_handler(:mcp_file, :logger_std_h, %{
+          level: level,
+          # `filesync_repeat_interval` defaults to 5s, and the transport monitor
+          # ends the session with System.halt/1, which does not flush handler
+          # buffers — a short session would otherwise leave an empty file.
+          config: %{file: String.to_charlist(path), filesync_repeat_interval: 500},
+          formatter:
+            {:logger_formatter,
+             %{
+               template: [:time, " [", :level, "] ", :msg, "\n"],
+               single_line: true
+             }}
+        })
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp flush_file_log do
+    case :logger.get_handler_config(:mcp_file) do
+      {:ok, _config} -> :logger_std_h.filesync(:mcp_file)
+      _ -> :ok
+    end
+  rescue
+    _ -> :ok
+  end
+
+  defp log_level do
+    case System.get_env("MCP_LOG_LEVEL", "warning") do
+      "debug" -> :debug
+      "info" -> :info
+      "error" -> :error
+      _ -> :warning
     end
   end
 
@@ -58,6 +114,10 @@ defmodule StdioMcp.Application do
 
     receive do
       {:DOWN, ^ref, :process, ^pid, _reason} ->
+        # System.halt/1 exits without running the shutdown sequence, so buffered
+        # handler output is lost — the file log of a short session would be
+        # empty. Sync explicitly before going down.
+        flush_file_log()
         System.halt(0)
     end
   end

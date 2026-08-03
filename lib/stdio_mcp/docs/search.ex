@@ -2,7 +2,7 @@ defmodule StdioMcp.Docs.Search do
   @moduledoc "Hybrid FTS5 + sqlite-vec vector search over package docs."
   import Ecto.Query
   import SqliteVec.Ecto.Query
-  alias StdioMcp.Docs.IngestionWorker
+  alias StdioMcp.Docs.TarballIngestion
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
   require Logger
@@ -15,7 +15,7 @@ defmodule StdioMcp.Docs.Search do
     embedding = Keyword.get(opts, :embedding)
     limit = Keyword.get(opts, :limit, 10)
 
-    notices = ensure_ingested(package, version, refresh, query)
+    {notices, resolved_version} = ensure_ingested(package, version, refresh, query)
 
     base_query = from(d in PackageDoc)
 
@@ -26,7 +26,10 @@ defmodule StdioMcp.Docs.Search do
         base_query
       end
 
-    version_filter = version
+    # Prefer the version ingestion actually resolved: asking for "latest" and
+    # filtering on the literal string matches nothing, and without a filter
+    # results from several stored versions get mixed together.
+    version_filter = resolved_version || version
 
     base_query =
       if is_binary(version_filter) and version_filter != "" and version_filter != "latest" do
@@ -53,16 +56,20 @@ defmodule StdioMcp.Docs.Search do
 
     results =
       if sanitized != "" do
-        # FTS5 match OR rows with embeddings, ranked by vector distance
+        # The MATCH has to sit in a standalone query against the FTS table.
+        # Written as `left_join ... where: MATCH(...) or ...` SQLite rejects it
+        # with "unable to use function MATCH in the requested context" — every
+        # call raised, the rescue below swallowed it, and the search silently
+        # degraded to FTS-only, never using the stored embeddings.
+        fts_ids =
+          from(f in "package_docs_fts",
+            where: fragment("package_docs_fts MATCH ?", ^sanitized),
+            select: f.rowid
+          )
+
         from(d in base_query,
-          left_join: fts in "package_docs_fts",
-          on: d.id == fts.rowid,
-          where:
-            fragment("package_docs_fts MATCH ?", ^sanitized) or
-              (not is_nil(d.embedding) and d.embedding != ""),
-          order_by: [
-            asc: vec_distance_cosine(d.embedding, ^vec_param)
-          ],
+          where: d.id in subquery(fts_ids) or (not is_nil(d.embedding) and d.embedding != ""),
+          order_by: [asc: vec_distance_cosine(d.embedding, ^vec_param)],
           limit: ^limit
         )
         |> Repo.all()
@@ -119,14 +126,9 @@ defmodule StdioMcp.Docs.Search do
 
   defp ensure_ingested(package, version, refresh, _query) do
     cond do
-      is_nil(package) or package == "" ->
-        []
-
-      refresh ->
-        maybe_auto_ingest(package, true, version)
-
-      true ->
-        maybe_auto_ingest(package, false, version)
+      is_nil(package) or package == "" -> {[], nil}
+      refresh -> maybe_auto_ingest(package, true, version)
+      true -> maybe_auto_ingest(package, false, version)
     end
   end
 
@@ -134,7 +136,7 @@ defmodule StdioMcp.Docs.Search do
     target_version = normalize_version(version)
 
     if not refresh and already_ingested?(package, target_version) do
-      []
+      {[], nil}
     else
       Logger.info("[Docs.Search] auto-ingesting docs for package: #{package} (#{target_version})")
       run_ingestion(package, target_version)
@@ -154,38 +156,52 @@ defmodule StdioMcp.Docs.Search do
     Repo.exists?(from(d in PackageDoc, where: d.package == ^package and d.version == ^version))
   end
 
+  # Tarball ingestion is one download plus embedding, so a large package runs to
+  # ~45s. The caller does not block that long: past this the task is detached and
+  # the query returns a "try again shortly" notice that is now accurate.
+  @ingest_timeout 20_000
+
   defp run_ingestion(package, target_version) do
     task =
       Task.Supervisor.async_nolink(StdioMcp.TaskSupervisor, fn ->
-        IngestionWorker.ingest(package, target_version)
+        TarballIngestion.ingest(package, target_version)
       end)
 
-    result = Task.yield(task, 15_000) || Task.shutdown(task)
+    # `Task.shutdown/1` would *kill* the task, so a package needing longer than
+    # the timeout could never finish: every attempt was terminated at 15s and the
+    # "still ingesting" notice was a lie. `Task.ignore/1` detaches instead, so the
+    # work really does continue and a later query finds the rows.
+    result = Task.yield(task, @ingest_timeout) || Task.ignore(task)
     handle_ingest_result(result, package)
   end
 
-  # `ingest/2` reports success in two shapes: {:ok, count, version} from the
-  # search-data path and {:ok, count} from the single-page fallback. Only the
-  # second was matched, so a successful ingest via the main path raised
-  # CaseClauseError *after* writing the rows — the caller saw a failure for work
-  # that had actually succeeded, and only a retry appeared to work.
-  defp handle_ingest_result({:ok, {:ok, count, _version}}, package),
-    do: log_ingested(count, package)
+  # Ingestion reports success in two shapes: {:ok, count, version} and
+  # {:ok, count}. Both are matched, plus a catch-all — matching only one of them
+  # is how a successful ingest previously raised CaseClauseError *after* writing
+  # the rows. Returning the resolved version lets the caller scope results to the
+  # version that was just indexed.
+  defp handle_ingest_result({:ok, {:ok, count, resolved_version}}, package) do
+    {["Docs for '#{package}' v#{resolved_version} were just indexed (#{count} docs)."],
+     resolved_version}
+  end
 
-  defp handle_ingest_result({:ok, {:ok, count}}, package),
-    do: log_ingested(count, package)
+  defp handle_ingest_result({:ok, {:ok, _count}}, package) do
+    {["Docs for '#{package}' were just indexed."], nil}
+  end
 
-  defp handle_ingest_result({:ok, {:error, reason}}, package),
-    do: ["Docs for '#{package}' ingestion issue: #{inspect(reason)}."]
+  defp handle_ingest_result({:ok, {:error, {:no_docs, ver}}}, package) do
+    {["No docs published for '#{package}' v#{ver} and could not detect a served version."], nil}
+  end
 
-  defp handle_ingest_result(nil, package),
-    do: ["Docs for '#{package}' still ingesting — try again shortly."]
+  defp handle_ingest_result({:ok, {:error, reason}}, package) do
+    {["Ingestion failed for '#{package}': #{inspect(reason)}"], nil}
+  end
 
-  defp handle_ingest_result(other, package),
-    do: ["Docs for '#{package}' ingestion returned an unexpected result: #{inspect(other)}."]
+  defp handle_ingest_result(nil, package) do
+    {["Docs for '#{package}' still ingesting (large package) — try again shortly."], nil}
+  end
 
-  defp log_ingested(count, package) do
-    Logger.info("[Docs.Search] Ingested #{count} docs for #{package}")
-    []
+  defp handle_ingest_result(other, package) do
+    {["Ingestion for '#{package}' returned an unexpected result: #{inspect(other)}"], nil}
   end
 end

@@ -10,7 +10,9 @@
         "MIX_ENV": "prod",
         "MISTRAL_API_KEY": "your-key-here",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
+        "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db",
+        "MCP_LOG_FILE": "/absolute/path/to/local_hex_mcp/tmp_logs.txt",
+        "MCP_LOG_LEVEL": "warning"
       }
     }
   }

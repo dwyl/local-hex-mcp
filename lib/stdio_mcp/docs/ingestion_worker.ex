@@ -73,14 +73,25 @@ defmodule StdioMcp.Docs.IngestionWorker do
       |> Enum.reject(&is_nil/1)
 
     docs_with_embeddings = attach_embeddings_batch(docs)
-    save_docs(docs_with_embeddings, canonical, version)
+    result = save_docs(docs_with_embeddings, canonical, version)
 
-    # Clear per-page HTML cache from process dictionary
+    clear_html_cache()
+
+    # Report the number of rows actually written, not the number prepared: the
+    # two differ whenever the transaction rolls back, and the caller logs this
+    # figure as "ingested N docs".
+    case result do
+      {:ok, count} -> {:ok, count, version}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # The per-page HTML cache lives in the process dictionary for the duration of
+  # one ingest, so several items on the same page share a single fetch.
+  defp clear_html_cache do
     Process.get_keys()
     |> Enum.filter(&match?({:html_cache, _}, &1))
     |> Enum.each(&Process.delete/1)
-
-    {:ok, length(docs), version}
   end
 
   @doc """
@@ -249,39 +260,79 @@ defmodule StdioMcp.Docs.IngestionWorker do
 
     module_items = Enum.flat_map(modules, &extract_module_items/1)
 
-    extra_items =
-      Enum.map(extras, fn extra ->
-        id = Map.get(extra, "id", "")
-        title = Map.get(extra, "title", id)
-
-        %{
-          "ref" => "#{id}.html",
-          "title" => title,
-          "doc" => title,
-          "type" => "guide"
-        }
-      end)
+    extra_items = Enum.flat_map(extras, &extract_extra_items/1)
 
     module_items ++ extra_items
+  end
+
+  # The index already declares each guide's section anchors, and they resolve to
+  # real ids in the HTML. Emitting one item per section gives a retrieval unit
+  # that matches the document's own structure, and a URL that actually links to
+  # it — strictly better than fetching the whole page and cutting it into
+  # fixed-size windows anchored at the page top.
+  defp extract_extra_items(extra) do
+    id = Map.get(extra, "id", "")
+    title = Map.get(extra, "title", id)
+
+    case Map.get(extra, "headers", []) do
+      [] ->
+        [%{"ref" => "#{id}.html", "title" => title, "doc" => title, "type" => "guide"}]
+
+      headers ->
+        Enum.map(headers, fn header ->
+          anchor = Map.get(header, "anchor", "")
+          section_title = Map.get(header, "id", anchor)
+
+          %{
+            "ref" => "#{id}.html##{anchor}",
+            "title" => "#{title} — #{section_title}",
+            "doc" => title,
+            "type" => "guide"
+          }
+        end)
+    end
   end
 
   defp extract_module_items(mod) do
     mod_id = Map.get(mod, "id", "")
     mod_title = Map.get(mod, "title", mod_id)
 
-    mod_item = %{
-      "ref" => "#{mod_id}.html",
-      "title" => mod_title,
-      "doc" => mod_title,
-      "type" => "module"
-    }
+    # Where the moduledoc declares sections, index those instead of the page as
+    # a whole: the page also contains every function detail, so a single
+    # whole-page row is both enormous and largely duplicated by the per-function
+    # items below. This is what produced 26k-character rows.
+    mod_items =
+      case Map.get(mod, "sections", []) do
+        [] ->
+          [
+            %{
+              "ref" => "#{mod_id}.html",
+              "title" => mod_title,
+              "doc" => mod_title,
+              "type" => "module"
+            }
+          ]
+
+        sections ->
+          Enum.map(sections, fn section ->
+            anchor = Map.get(section, "anchor", "")
+            section_title = Map.get(section, "id", anchor)
+
+            %{
+              "ref" => "#{mod_id}.html##{anchor}",
+              "title" => "#{mod_title} — #{section_title}",
+              "doc" => mod_title,
+              "type" => "module"
+            }
+          end)
+      end
 
     func_items =
       mod
       |> Map.get("nodeGroups", [])
       |> Enum.flat_map(&extract_node_group_items(mod_id, mod_title, &1))
 
-    [mod_item | func_items]
+    mod_items ++ func_items
   end
 
   defp extract_node_group_items(mod_id, mod_title, group) do
@@ -326,7 +377,7 @@ defmodule StdioMcp.Docs.IngestionWorker do
     content = resolve_content(doc_text, title, hexdocs_url)
 
     if content != "" || title != "" do
-      chunks = chunk_content(content)
+      chunks = maybe_chunk(content)
       multi_part? = match?([_, _ | _], chunks)
 
       item_meta = %{ref: ref, title: title, type: type, url: hexdocs_url}
@@ -340,6 +391,15 @@ defmodule StdioMcp.Docs.IngestionWorker do
   end
 
   def build_doc_items(_package, _version, _base_url, _item), do: []
+
+  # Chunking is a fallback, not the primary strategy. Items now correspond to
+  # the document's own sections, which are coherent retrieval units; splitting a
+  # 600-character function doc at 400 characters fragments it for no gain. Only
+  # oversized content gets cut.
+  @chunk_threshold 1500
+
+  defp maybe_chunk(content) when byte_size(content) <= @chunk_threshold, do: [content]
+  defp maybe_chunk(content), do: chunk_content(content)
 
   # A doc entry may be split into several chunks; only then does a chunk get a
   # "Part N" suffix, so a single-chunk entry keeps its original signature.
@@ -376,10 +436,25 @@ defmodule StdioMcp.Docs.IngestionWorker do
     doc_text != "" and doc_text != title and String.length(doc_text) > String.length(title)
   end
 
+  # `:chunk_size` / `:chunk_overlap` are the real option names. This previously
+  # passed `:target_chunk_size`, which text_chunker rejects with
+  # {:error, "unknown options [:target_chunk_size]"} — and the old
+  # `{:error, _} -> [text]` clause swallowed it, so nothing was ever chunked.
+  # Whole documents went in as single rows: 72 of them over 3k characters, the
+  # largest 26k, each reduced to one embedding that averages the meaning away.
   defp chunk_content(text) do
-    case TextChunker.split(text, format: :markdown, target_chunk_size: 400) do
-      {:error, _} -> [text]
-      chunks when is_list(chunks) -> Enum.map(chunks, & &1.text)
+    case TextChunker.split(text, chunk_size: 400, chunk_overlap: 40, format: :markdown) do
+      chunks when is_list(chunks) ->
+        Enum.map(chunks, & &1.text)
+
+      {:error, reason} ->
+        # Loud on purpose: a silent fallback here degrades every subsequent
+        # search without producing any visible failure.
+        Logger.warning(
+          "[IngestionWorker] chunking failed (#{inspect(reason)}) — storing unchunked"
+        )
+
+        [text]
     end
   end
 
@@ -432,13 +507,51 @@ defmodule StdioMcp.Docs.IngestionWorker do
     end
   end
 
+  # ExDoc emits two different shapes for an anchor, and they need different
+  # extraction:
+  #
+  #   <section class="detail" id="component/2">   self-contained container
+  #   <h2 id="the-server-module">                 heading; the section is
+  #                                               everything up to the next heading
+  #
+  # Function, type and callback anchors are the first; guide headers and module
+  # sections are the second. Trying the container first and falling back to the
+  # heading form covers both.
   defp extract_section_by_anchor(html, anchor) do
-    # Match <section id="anchor">...</section>
     pattern = ~r/<section[^>]*id="#{Regex.escape(anchor)}"[^>]*>(.*?)<\/section>/si
 
     case Regex.run(pattern, html) do
       [_, section_html] -> extract_text_from_html_fragment(section_html)
-      _ -> ""
+      _ -> extract_heading_section(html, anchor)
+    end
+  end
+
+  # Takes the slice between the heading carrying `anchor` and the next heading
+  # of any level, which is how ExDoc lays out guide and moduledoc sections.
+  defp extract_heading_section(html, anchor) do
+    headings =
+      ~r/<h[1-6][^>]*\sid="([^"]+)"/i
+      |> Regex.scan(html, return: :index)
+      |> Enum.map(fn [{start, _}, {id_start, id_len}] ->
+        {start, binary_part(html, id_start, id_len)}
+      end)
+
+    case Enum.find_index(headings, fn {_start, id} -> id == anchor end) do
+      nil ->
+        ""
+
+      idx ->
+        {start, _} = Enum.at(headings, idx)
+
+        stop =
+          case Enum.at(headings, idx + 1) do
+            {next_start, _} -> next_start
+            nil -> byte_size(html)
+          end
+
+        html
+        |> binary_part(start, stop - start)
+        |> extract_text_from_html_fragment()
     end
   end
 
@@ -559,9 +672,24 @@ defmodule StdioMcp.Docs.IngestionWorker do
 
       entries
       |> Enum.chunk_every(100)
-      |> Enum.each(&Repo.insert_all(PackageDoc, &1))
+      |> Enum.reduce(0, fn batch, acc ->
+        {count, _} = Repo.insert_all(PackageDoc, batch)
+        acc + count
+      end)
     end)
+    |> case do
+      # The transaction result was previously discarded and {:ok, length(docs)}
+      # returned unconditionally, so a rolled-back insert still reported success
+      # and the caller logged "ingested N docs" for rows that were never written.
+      {:ok, count} ->
+        {:ok, count}
 
-    {:ok, length(docs)}
+      {:error, reason} ->
+        Logger.error(
+          "[IngestionWorker] save_docs failed for #{package} v#{version}: #{inspect(reason)}"
+        )
+
+        {:error, {:save_failed, reason}}
+    end
   end
 end
