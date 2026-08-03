@@ -2,6 +2,12 @@
 
 A lightweight Elixir MCP server designed to run over `stdio` transport.
 
+- `search-docs`: ask a question regarding an Elixir package, and the tool with either research from the database or download and digest the package(s) and respond (limited to 30 token/s so can be lengthy if the package is big)
+- `remember`: save knowledge points (pattern, pain points)
+- `recall`: check your knowledge database
+
+> you can check your LLM helper consumption with `get_token_usage`.
+
 ## Tech
 
 - `SQLite` + FTS5 + `sqlite-vec`
@@ -34,7 +40,7 @@ A lightweight Elixir MCP server designed to run over `stdio` transport.
 
 - **Hybrid search**: FTS5 broadens candidates, `vec_distance_cosine` re-ranks by semantic similarity — all in a single SQL query via sqlite-vec's native C layer.
 - **Intelligent Knowledge Memory**: Multi-stage LLM curation pipeline (`decide`, `merge`, `append`, `discard`) powered by Mistral for deduplication and structuring.
-- **HexDocs & Hex.pm Ingestion**: Auto-fetches and indexes package documentation and GitHub issues on demand using Mistral embeddings.
+- **HexDocs & Hex.pm Ingestion**: Auto-fetches and indexes package documentation and GitHub issues on demand using the AI provider embeddings.
 
 ## Tools
 
