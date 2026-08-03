@@ -29,6 +29,7 @@ defmodule StdioMcp.Docs.TarballIngestion do
   """
 
   alias StdioMcp.AI.Client
+  alias StdioMcp.Docs.IngestionJob
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
 
@@ -38,6 +39,43 @@ defmodule StdioMcp.Docs.TarballIngestion do
   @chunk_threshold 1500
   @user_agent {"user-agent", "stdio_mcp/1.0"}
 
+  # Req's `:request_timeout` defaults to `:infinity`, and `:receive_timeout`
+  # (15s) only bounds the wait for the *next* packet — a server trickling bytes
+  # slower than that keeps the request open forever. These are GETs, so Req's
+  # default `retry: :safe_transient` also retries them with backoff on top. An
+  # explicit ceiling is what stops a wedged fetch from occupying an
+  # IngestionJob key permanently.
+  @request_timeout 120_000
+
+  # Both tunable via EMBED_BATCH_SIZE / EMBED_CONCURRENCY (see
+  # config/runtime.exs) — they depend on the provider's rate limit, not on this
+  # code, and are read at call time so a restart picks up a new value.
+
+  # Mistral rate-limits on `requests_per_second` (plus per-model token limits),
+  # so the batch size — not the concurrency — is the dominant lever: 5415 docs at
+  # 50 per request is 109 requests, at 200 it is 28. Bigger still trades request
+  # pressure for token pressure, since mistral-embed has an 8k context.
+  @default_embed_batch_size 200
+
+  # 4 was measured to exhaust the embedding provider's rate limit on a
+  # 109-batch package, failing the whole ingest with 429s. The batches are
+  # already the efficient unit, so concurrency past 2 buys little and costs
+  # backoff. Bounded above by the Finch pool (size 10), never by CPU count.
+  @default_embed_concurrency 2
+
+  defp embed_batch_size do
+    Application.get_env(:stdio_mcp, :embed_batch_size, @default_embed_batch_size)
+  end
+
+  defp embed_concurrency do
+    Application.get_env(:stdio_mcp, :embed_concurrency, @default_embed_concurrency)
+  end
+
+  @embed_batch_timeout 180_000
+  @embed_max_attempts 5
+  @embed_backoff_ms 1_000
+  @embed_backoff_max_ms 30_000
+
   @doc """
   Ingests `package` at `version` ("latest" resolves via the Hex API).
 
@@ -45,19 +83,25 @@ defmodule StdioMcp.Docs.TarballIngestion do
   """
   def ingest(package, version \\ "latest") when is_binary(package) do
     with {:ok, resolved} <- resolve_version(package, version),
+         :ok <- IngestionJob.stage(:downloading),
          {:ok, tarball} <- download(package, resolved),
          {:ok, files} <- extract(tarball),
          {:ok, items} <- read_index(files) do
       base_url = "https://hexdocs.pm/#{package}/#{resolved}"
 
-      docs =
-        items
-        |> Enum.flat_map(&build_docs(&1, files, base_url))
-        |> attach_embeddings()
+      docs = Enum.flat_map(items, &build_docs(&1, files, base_url))
 
-      case save(docs, package, resolved) do
-        {:ok, count} -> {:ok, count, resolved}
-        error -> error
+      # Embedding failure aborts the ingest instead of saving. Persisting rows
+      # with nil embeddings writes an index that looks complete, passes every
+      # count check, and is invisible to vector search — a silent, permanent
+      # quality loss that only a re-ingest can undo.
+      with {:ok, embedded} <- attach_embeddings(docs) do
+        IngestionJob.stage(:saving)
+
+        case save(embedded, package, resolved) do
+          {:ok, count} -> {:ok, count, resolved}
+          error -> error
+        end
       end
     end
   end
@@ -65,7 +109,10 @@ defmodule StdioMcp.Docs.TarballIngestion do
   # -- Acquisition ------------------------------------------------------------
 
   defp resolve_version(package, "latest") do
-    case Req.get("https://hex.pm/api/packages/#{package}", headers: [@user_agent]) do
+    case Req.get("https://hex.pm/api/packages/#{package}",
+           headers: [@user_agent],
+           request_timeout: @request_timeout
+         ) do
       {:ok, %{status: 200, body: body}} ->
         {:ok, get_in(body, ["releases", Access.at(0), "version"]) || "latest"}
 
@@ -81,7 +128,12 @@ defmodule StdioMcp.Docs.TarballIngestion do
 
     # `decode_body: false` keeps the gzipped tar intact; Req would otherwise try
     # to interpret it based on content-type.
-    case Req.get(url, headers: [@user_agent], decode_body: false, redirect: :follow) do
+    case Req.get(url,
+           headers: [@user_agent],
+           decode_body: false,
+           redirect: :follow,
+           request_timeout: @request_timeout
+         ) do
       {:ok, %{status: 200, body: body}} when is_binary(body) ->
         {:ok, body}
 
@@ -396,21 +448,87 @@ defmodule StdioMcp.Docs.TarballIngestion do
 
   # -- Persistence ------------------------------------------------------------
 
+  # The embeddings endpoint takes a whole batch per request, so the batches are
+  # already the efficient unit — but they used to run one after another, and that
+  # sequential wait is essentially the entire ingestion time. Download, extract,
+  # parse and insert of a 872-doc package take ~0.5s; the embedding round trips
+  # take the other ~45s. Running them concurrently is the difference between
+  # finishing inside a caller's wait and not.
+  #
+  # Concurrency stays modest on purpose: each task holds a Finch connection and
+  # every extra in-flight request raises the chance of a 429, which costs more in
+  # backoff than the parallelism saves.
+  defp attach_embeddings([]), do: {:ok, []}
+
   defp attach_embeddings(docs) do
-    docs
-    |> Enum.chunk_every(50)
-    |> Enum.flat_map(fn batch ->
-      texts = Enum.map(batch, &embed_text/1)
+    batches = Enum.chunk_every(docs, embed_batch_size())
+    total = length(batches)
 
-      case Client.embed_batch(texts) do
-        {:ok, vectors} ->
-          Enum.zip_with(batch, vectors, &Map.put(&1, :embedding, &2))
+    batches
+    |> Task.async_stream(&embed_batch/1,
+      max_concurrency: embed_concurrency(),
+      ordered: true,
+      timeout: @embed_batch_timeout,
+      on_timeout: :kill_task
+    )
+    |> Enum.reduce_while({:ok, [], 0}, &collect_batch(&1, &2, total))
+    |> case do
+      {:ok, acc, _done} -> {:ok, acc |> Enum.reverse() |> Enum.concat()}
+      {:error, reason} -> {:error, {:embedding_failed, reason}}
+    end
+  end
 
-        {:error, reason} ->
-          Logger.warning("[TarballIngestion] embedding batch failed: #{inspect(reason)}")
-          Enum.map(batch, &Map.put(&1, :embedding, nil))
-      end
-    end)
+  # Runs in the ingesting process, not the stream tasks, which is what makes the
+  # progress update safe: Registry.update_value/3 only writes the *caller's* own
+  # registration, so a stage/1 call from inside a task is a silent no-op.
+  defp collect_batch({:ok, {:ok, embedded}}, {:ok, acc, done}, total) do
+    IngestionJob.stage("embedding #{done + 1}/#{total}")
+    {:cont, {:ok, [embedded | acc], done + 1}}
+  end
+
+  defp collect_batch({:ok, {:error, reason}}, _acc, _total), do: {:halt, {:error, reason}}
+  defp collect_batch({:exit, reason}, _acc, _total), do: {:halt, {:error, {:task_exit, reason}}}
+
+  defp embed_batch(batch, attempt \\ 1) do
+    texts = Enum.map(batch, &embed_text/1)
+
+    case Client.embed_batch(texts) do
+      # Every vector has to be real. One nil slipping through would persist a row
+      # that `Docs.Search.already_ingested?/2` treats as incomplete forever, and
+      # the package would re-ingest on every single search.
+      {:ok, vectors} when length(vectors) == length(batch) ->
+        if Enum.all?(vectors, &is_list/1) do
+          {:ok, Enum.zip_with(batch, vectors, &Map.put(&1, :embedding, &2))}
+        else
+          {:error, :nil_vector_in_response}
+        end
+
+      # A short vector list would silently misalign embeddings against docs, and
+      # zip_with would drop the tail — worse than failing.
+      {:ok, vectors} ->
+        {:error, {:vector_count_mismatch, length(vectors), length(batch)}}
+
+      {:error, {429, retry_after_ms}} when attempt < @embed_max_attempts ->
+        delay = backoff(retry_after_ms, attempt)
+        Logger.warning("[TarballIngestion] embedding rate limited, retrying in #{delay}ms")
+        Process.sleep(delay)
+        embed_batch(batch, attempt + 1)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # The server's own Retry-After wins when it sends one — it knows when the
+  # window reopens and guessing shorter just burns another attempt. Otherwise
+  # back off exponentially: linear 1s/2s/3s steps were measured to be too
+  # shallow to outlast a rate-limit window.
+  defp backoff(retry_after_ms, _attempt) when is_integer(retry_after_ms) do
+    min(retry_after_ms, @embed_backoff_max_ms)
+  end
+
+  defp backoff(_retry_after_ms, attempt) do
+    min(@embed_backoff_ms * Integer.pow(2, attempt - 1), @embed_backoff_max_ms)
   end
 
   defp embed_text(doc) do

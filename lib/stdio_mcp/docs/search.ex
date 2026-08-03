@@ -2,6 +2,7 @@ defmodule StdioMcp.Docs.Search do
   @moduledoc "Hybrid FTS5 + sqlite-vec vector search over package docs."
   import Ecto.Query
   import SqliteVec.Ecto.Query
+  alias StdioMcp.Docs.IngestionJob
   alias StdioMcp.Docs.TarballIngestion
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
@@ -67,20 +68,22 @@ defmodule StdioMcp.Docs.Search do
             select: f.rowid
           )
 
-        from(d in base_query,
-          where: d.id in subquery(fts_ids) or (not is_nil(d.embedding) and d.embedding != ""),
-          order_by: [asc: vec_distance_cosine(d.embedding, ^vec_param)],
-          limit: ^limit
-        )
-        |> Repo.all()
+        # This was `d.id in subquery(fts_ids) or (not is_nil(d.embedding) ...)`,
+        # which is two bugs in one clause. "FTS matches OR anything embedded"
+        # reduces to "anything embedded", so the FTS candidates were never
+        # actually narrowing anything — the re-ranking ran over the whole
+        # package. And the left side admitted rows with a nil embedding, which
+        # then reached vec_distance_cosine and raised, so a single legacy nil row
+        # took down every vector search for that package.
+        case Repo.all(hybrid_query(base_query, fts_ids, vec_param, limit)) do
+          # Keyword terms that match nothing should not mean "no results" —
+          # fall back to ranking the package by vector distance alone.
+          [] -> Repo.all(vector_query(base_query, vec_param, limit))
+          hits -> hits
+        end
       else
         # No useful FTS terms — pure vector search on rows with embeddings
-        from(d in base_query,
-          where: not is_nil(d.embedding) and d.embedding != "",
-          order_by: [asc: vec_distance_cosine(d.embedding, ^vec_param)],
-          limit: ^limit
-        )
-        |> Repo.all()
+        Repo.all(vector_query(base_query, vec_param, limit))
       end
 
     {results, []}
@@ -116,6 +119,22 @@ defmodule StdioMcp.Docs.Search do
       {[], ["Search query failed: #{Exception.message(e)}"]}
   end
 
+  # Rows without an embedding are excluded everywhere a cosine ordering is used:
+  # sqlite-vec raises on a NULL vector rather than sorting it last.
+  defp vector_query(base_query, vec_param, limit) do
+    from(d in base_query,
+      where: not is_nil(d.embedding) and d.embedding != "",
+      order_by: [asc: vec_distance_cosine(d.embedding, ^vec_param)],
+      limit: ^limit
+    )
+  end
+
+  defp hybrid_query(base_query, fts_ids, vec_param, limit) do
+    from(d in vector_query(base_query, vec_param, limit),
+      where: d.id in subquery(fts_ids)
+    )
+  end
+
   # Sanitize query for FTS5: strip punctuation, join with OR
   defp sanitize_fts(query) do
     query
@@ -136,7 +155,7 @@ defmodule StdioMcp.Docs.Search do
     target_version = normalize_version(version)
 
     if not refresh and already_ingested?(package, target_version) do
-      {[], nil}
+      {incomplete_notices(package, target_version), nil}
     else
       Logger.info("[Docs.Search] auto-ingesting docs for package: #{package} (#{target_version})")
       run_ingestion(package, target_version)
@@ -147,32 +166,64 @@ defmodule StdioMcp.Docs.Search do
   defp normalize_version(_version), do: "latest"
 
   # Docs are stored under the resolved version, so "latest" can never match a
-  # stored value; the presence of any row for the package is the real test.
-  defp already_ingested?(package, "latest") do
-    Repo.exists?(from(d in PackageDoc, where: d.package == ^package))
-  end
+  # stored value; the presence of rows for the package is the real test.
+  defp doc_scope(package, "latest"), do: from(d in PackageDoc, where: d.package == ^package)
 
-  defp already_ingested?(package, version) do
-    Repo.exists?(from(d in PackageDoc, where: d.package == ^package and d.version == ^version))
+  defp doc_scope(package, version),
+    do: from(d in PackageDoc, where: d.package == ^package and d.version == ^version)
+
+  defp already_ingested?(package, version), do: Repo.exists?(doc_scope(package, version))
+
+  # A row with a nil embedding is invisible to vector search while still
+  # counting as indexed, so this damage is otherwise undetectable from a search.
+  #
+  # Treating it as "not ingested" and repairing automatically was tried and is
+  # worse: a package that *cannot* be re-embedded — rate limit, missing key —
+  # re-downloads the tarball and fails again on every single search, never
+  # converging. Naming the damage costs one COUNT and leaves the expensive
+  # repair to an explicit `refresh: true`.
+  defp incomplete_notices(package, version) do
+    scope = doc_scope(package, version)
+
+    case Repo.aggregate(from(d in scope, where: is_nil(d.embedding)), :count) do
+      0 ->
+        []
+
+      missing ->
+        [
+          "Docs for '#{package}' have #{missing} entries with no embedding — those are " <>
+            "invisible to vector search. Pass refresh: true to re-ingest the package."
+        ]
+    end
   end
 
   # Tarball ingestion is one download plus embedding, so a large package runs to
-  # ~45s. The caller does not block that long: past this the task is detached and
-  # the query returns a "try again shortly" notice that is now accurate.
-  @ingest_timeout 20_000
+  # ~45s. Waiting is what the caller wants — the whole point is to answer from a
+  # *complete* ingestion — but the ceiling is not what the job needs, it is what
+  # the transport allows. Anubis's session GenServer.call gives up at 30s
+  # (observed: `session_call_failed, {:timeout, {GenServer, :call, [..., 30000]}}`),
+  # so anything at or above that never returns a notice at all — the request just
+  # dies. Staying under it is what makes the progress notice reachable, and the
+  # retry-and-attach path the normal way a slow package completes.
+  # 25s, not 30s: the whole 30s budget is the session call, and this wait is only
+  # one part of what runs inside it — the query embedding happens before it and
+  # the FTS/vector query after. Setting this to the ceiling itself guarantees the
+  # request dies before the notice can be returned.
+  #
+  # Tunable via INGEST_TIMEOUT_MS (see config/runtime.exs); read at call time so
+  # a restart is enough to pick up a new value.
+  @default_ingest_timeout 25_000
+
+  defp ingest_timeout do
+    Application.get_env(:stdio_mcp, :ingest_timeout_ms, @default_ingest_timeout)
+  end
 
   defp run_ingestion(package, target_version) do
-    task =
-      Task.Supervisor.async_nolink(StdioMcp.TaskSupervisor, fn ->
-        TarballIngestion.ingest(package, target_version)
-      end)
-
-    # `Task.shutdown/1` would *kill* the task, so a package needing longer than
-    # the timeout could never finish: every attempt was terminated at 15s and the
-    # "still ingesting" notice was a lie. `Task.ignore/1` detaches instead, so the
-    # work really does continue and a later query finds the rows.
-    result = Task.yield(task, @ingest_timeout) || Task.ignore(task)
-    handle_ingest_result(result, package)
+    TarballIngestion
+    |> IngestionJob.run(package, target_version, ingest_timeout(), fn ->
+      TarballIngestion.ingest(package, target_version)
+    end)
+    |> handle_ingest_result(package)
   end
 
   # Ingestion reports success in two shapes: {:ok, count, version} and
@@ -197,11 +248,30 @@ defmodule StdioMcp.Docs.Search do
     {["Ingestion failed for '#{package}': #{inspect(reason)}"], nil}
   end
 
-  defp handle_ingest_result(nil, package) do
-    {["Docs for '#{package}' still ingesting (large package) — try again shortly."], nil}
+  # Not a failure and not a lie: the job is still running, and saying how long it
+  # has been going and what it is doing is what stops an impatient retry from
+  # looking like nothing happened.
+  # The retry instruction has to say "without refresh" explicitly. `refresh:
+  # true` forces a new ingestion unconditionally, so a caller who repeats the
+  # original arguments after this notice does not attach to the running job —
+  # it re-downloads and re-embeds the entire package from scratch, competing
+  # with the job already doing that work.
+  defp handle_ingest_result({:timeout, progress}, package) do
+    {[
+       "Docs for '#{package}' are still being indexed (#{describe(progress)}). " <>
+         "The job is still running — retry the same query shortly WITHOUT refresh: true " <>
+         "to attach to it and get its result. Retrying with refresh: true restarts the " <>
+         "whole ingestion instead."
+     ], nil}
   end
 
   defp handle_ingest_result(other, package) do
     {["Ingestion for '#{package}' returned an unexpected result: #{inspect(other)}"], nil}
   end
+
+  defp describe(%{stage: stage, elapsed_ms: ms}) when is_integer(ms) do
+    "#{stage}, #{div(ms, 1000)}s elapsed"
+  end
+
+  defp describe(_progress), do: "in progress"
 end

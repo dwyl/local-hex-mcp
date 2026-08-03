@@ -2,24 +2,30 @@ defmodule StdioMcp.Docs.IngestionWorker do
   @moduledoc "Ported HexDocs worker supporting sidebarNodes, search_data, and TextChunker for SQLite."
   import Ecto.Query
   alias StdioMcp.AI.Client
+  alias StdioMcp.Docs.IngestionJob
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
   require Logger
 
+  # Reads the same INGEST_TIMEOUT_MS as Docs.Search rather than keeping its own
+  # copy: the bound is the transport's request ceiling, which is a property of
+  # the caller, not of which ingestion module happens to be running.
+  @default_ingest_timeout 25_000
+
+  defp ingest_timeout do
+    Application.get_env(:stdio_mcp, :ingest_timeout_ms, @default_ingest_timeout)
+  end
+
+  # A concurrent caller used to be turned away with {:error, :already_ingesting}
+  # and no result at all. It now waits on the one running job and gets the same
+  # answer, and only reports back if that wait runs out.
   def ingest(package, version \\ "latest") when is_binary(package) do
-    key = {__MODULE__, package}
-
-    case Registry.register(StdioMcp.IngestionRegistry, key, :running) do
-      {:ok, _} ->
-        try do
-          do_ingest(package, version)
-        after
-          Registry.unregister(StdioMcp.IngestionRegistry, key)
-        end
-
-      {:error, {:already_registered, _}} ->
-        Logger.info("[IngestionWorker] skipping #{package} — already ingesting")
-        {:error, :already_ingesting}
+    __MODULE__
+    |> IngestionJob.run(package, version, ingest_timeout(), fn -> do_ingest(package, version) end)
+    |> case do
+      {:ok, result} -> result
+      {:timeout, progress} -> {:error, {:still_ingesting, progress}}
+      {:error, reason} -> {:error, reason}
     end
   end
 

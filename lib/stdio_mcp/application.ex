@@ -18,7 +18,11 @@ defmodule StdioMcp.Application do
       [
         StdioMcp.Repo,
         {Finch, name: StdioMcp.Finch, pools: %{provider => [size: 10]}},
+        # Two registries back StdioMcp.Docs.IngestionJob: the unique one names the
+        # single in-flight job per {module, package, version}, the duplicate one
+        # holds every caller waiting on it.
         {Registry, keys: :unique, name: StdioMcp.IngestionRegistry},
+        {Registry, keys: :duplicate, name: StdioMcp.IngestionWaiters},
         {Task.Supervisor, name: StdioMcp.TaskSupervisor}
       ] ++ mcp_children()
 

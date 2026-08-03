@@ -56,14 +56,24 @@ defmodule StdioMcp.AI.Client do
 
       body = %{model: model, input: texts}
 
-      case Req.post(url, json: body, headers: headers, finch: [name: StdioMcp.Finch]) do
+      # A batch of 50 inputs regularly outruns Req's 15s default receive_timeout,
+      # and a timeout here surfaces as a failed batch that aborts the ingest.
+      case Req.post(url,
+             json: body,
+             headers: headers,
+             receive_timeout: 60_000,
+             finch: [name: StdioMcp.Finch]
+           ) do
         {:ok, %{status: 200, body: %{"data" => data} = resp_body}} ->
           emit_usage(resp_body["usage"], model, :embedding)
           vectors = Enum.map(data, & &1["embedding"])
           {:ok, vectors}
 
-        {:ok, %{status: 429}} ->
-          {:error, {429, "Rate limit exceeded"}}
+        # Carries the server's Retry-After (in ms) rather than a message string,
+        # so a caller retrying a batch can wait exactly as long as it is told to
+        # instead of guessing. `nil` when the header is absent or unparsable.
+        {:ok, %{status: 429} = resp} ->
+          {:error, {429, retry_after_ms(resp)}}
 
         {:ok, %{status: status, body: err}} ->
           {:error, {status, err}}
@@ -71,6 +81,22 @@ defmodule StdioMcp.AI.Client do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  # Retry-After is defined as either delay-seconds or an HTTP date; only the
+  # numeric form is handled, and anything else falls back to the caller's own
+  # backoff rather than guessing at a date format.
+  defp retry_after_ms(resp) do
+    case Req.Response.get_header(resp, "retry-after") do
+      [value | _] ->
+        case Integer.parse(String.trim(value)) do
+          {seconds, ""} when seconds >= 0 -> seconds * 1000
+          _ -> nil
+        end
+
+      _ ->
+        nil
     end
   end
 
@@ -93,7 +119,12 @@ defmodule StdioMcp.AI.Client do
         %{model: model, messages: messages, temperature: 0.2}
         |> maybe_json_mode(opts)
 
-      case Req.post(url, json: body, headers: headers, receive_timeout: 90_000, finch: [name: StdioMcp.Finch]) do
+      case Req.post(url,
+             json: body,
+             headers: headers,
+             receive_timeout: 90_000,
+             finch: [name: StdioMcp.Finch]
+           ) do
         {:ok, %{status: 200, body: %{"choices" => [%{"message" => msg} | _]} = resp_body}} ->
           emit_usage(resp_body["usage"], model, :chat)
           {:ok, msg}

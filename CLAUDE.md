@@ -5,6 +5,11 @@
 - **`search_docs`**: Search official HexDocs guides, typespecs, and code examples.
   - When asked to search documentation for specific libraries or packages (e.g. `boruta`, `anubis_mcp`, `phoenix`, `plug`), **ALWAYS extract the target package name(s)** and pass it explicitly in the `package` argument (e.g. `package: "boruta"`) to trigger Hex.pm auto-ingestion into SQLite if not yet indexed.
   - **Grepping vs search_docs**: Use `grep` on `deps/` for quick function signatures of installed code. Use `search_docs` for conceptual guides, configuration patterns, code examples, or evaluating uninstalled packages.
+  - **`refresh` (re-ingestion)**: Pass `refresh: true` to re-download a package's docs from Hex.pm and replace what is indexed. Use it when docs look stale, when checking whether a **newer release** exists, or when the local index looks wrong. Do NOT pass it routinely — a re-ingest costs a full download plus re-embedding of every doc.
+    - `version: "latest"` **no longer** triggers re-ingestion on its own; it only targets the newest release, and an already-indexed package is served from SQLite. `refresh` is the only way to force a re-download, and it works for a specific `version` too.
+    - A package with rows missing embeddings is **reported, not repaired**: the payload carries a notice like `"Docs for 'x' have 315 entries with no embedding — those are invisible to vector search. Pass refresh: true to re-ingest the package."` Those entries are still returned by keyword search but never by vector search, so results are quietly weaker until repaired. Act on the notice with a single `refresh: true` call — do not ignore it, and do not re-run it repeatedly if it fails.
+    - Ingestion aborts rather than saving docs it could not embed, so a failed ingest leaves the previously indexed rows intact. On failure the payload carries a `notices` entry (e.g. `"Ingestion failed for 'x': {:embedding_failed, ...}"`) and results still come from whatever was already indexed.
+  - **Long ingestions**: A first-time or refreshed package may not finish within the tool call. The payload then carries a notice like `"Docs for 'x' are still being indexed (embedding 7/18, 20s elapsed)"`. The job keeps running — call `search_docs` again to collect its result, but **drop `refresh: true` from the retry**. Only a retry without `refresh` attaches to the running job; repeating the original arguments re-downloads and re-embeds the entire package from scratch, competing with the job already running. Never work around a slow ingestion by ingesting the same package repeatedly in parallel.
   - **Citing Package Versions**: When referencing documentation returned by `search_docs`, **ALWAYS include the package version(s)** returned in the payload (e.g. `anubis_mcp v1.14.0`, `boruta v3.0.0-beta.4`).
   - **No URL Extrapolation / Hallucination**: NEVER construct, guess, or extrapolate HexDocs or GitHub URLs. Only reference and output exact `hexdocs_url` links returned directly inside `search_docs` payloads or verified empirically.
 
@@ -65,6 +70,16 @@ Antigravity supports `cwd` natively:
   }
 }
 ```
+
+### Ingestion tuning (env vars)
+
+Set in the `env` block of `.mcp.json` / `mcp_config.json`; they take effect on a server restart, with **no recompile**. Defined in `config/runtime.exs`; a malformed or non-positive value falls back to the default rather than raising.
+
+| Variable | Default | Bounded by |
+| --- | --- | --- |
+| `INGEST_TIMEOUT_MS` | `25_000` | Must stay **below** the MCP transport's request ceiling (Anubis' session `GenServer.call` is 30s). At or above it the request dies before the "still ingesting" notice can be returned. |
+| `EMBED_BATCH_SIZE` | `200` | Inputs per embeddings request. The provider rate-limits on *requests* per second, so a larger batch is the strongest lever against 429s; bounded above by the embedding model's context length. |
+| `EMBED_CONCURRENCY` | `2` | Concurrent embedding requests. Bounded by the Finch pool (size 10) and the provider's rate limit — **not** by CPU count, since the work is IO-bound and a blocked process occupies no scheduler. |
 
 ### Important Notes
 
