@@ -15,7 +15,7 @@ A lightweight Elixir MCP server designed to run over `stdio` transport.
 - AI models (embeddings, chat-small, chat-medium).
 
 >[!IMPORTANT]
-> It uses AI support for computing embeddings and chat completions, thus an **AI_API_KEY** and three models.
+> It uses AI support for computing embeddings and chat completions; you must provide an **AI_API_KEY** and three models.
 
  |Tool                                                        | Embeddings (/embeddings)                                   | Chat Model (/chat/completions) |
   |--|--|--|
