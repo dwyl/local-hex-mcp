@@ -1,0 +1,247 @@
+ISSUES / FINDINGS — 2026-08-04
+==============================
+
+Recorded here because three `remember` calls were accepted
+({"status":"processing","accepted":true}) and silently lost. The root cause is
+still UNRESOLVED — four theories tested and refuted, see item 5. Until the
+reporting gap is fixed, a file in the repo beats a store whose failures are
+invisible to the caller.
+
+
+--------------------------------------------------------------------------
+1. OPEN — anubis_mcp v1.14.0 + OTP 29: :io.setopts silently skips encoding
+--------------------------------------------------------------------------
+(Already in the KB as entry 19, repeated here as the actionable item.)
+
+Symptom, on every server start:
+  [warning] MCP transport event: could not set up io options,
+            may produce unexpected behavior: :arguments
+
+Source: deps/anubis_mcp/lib/anubis/server/transport/stdio.ex:76
+
+    with {:error, err} <- :io.setopts(opts.io_device, encoding: :utf8, line_buffer: true) do
+
+Measured on OTP 29 (Erlang 29.0.4), isolating each option:
+
+    :io.setopts(:standard_io, encoding: :utf8)                     => :ok
+    :io.setopts(:standard_io, line_buffer: true)                   => {:error, :enotsup}
+    :io.setopts(:standard_io, encoding: :utf8, line_buffer: true)  => {:error, :enotsup}
+
+(Against the real stdio port the error surfaces as :arguments rather than
+:enotsup, but the outcome is identical.)
+
+`line_buffer` is not a supported :io.setopts option on modern OTP. Because both
+options are passed in ONE call and setopts is all-or-nothing, the whole call is
+rejected and the supported `encoding: :utf8` is never applied either.
+
+WHY IT MATTERS: the warning is cosmetic, the dropped encoding is not. It is
+currently harmless only by luck of the environment — LANG=en_US.UTF-8 means
+:io.getopts(:standard_io) already reports encoding: :unicode. Under a C/POSIX
+locale (a container with no locale set) the stdio device would be latin1 and the
+transport would emit JSON-RPC through it, mangling every non-ASCII byte. HexDocs
+content is full of them, and our own notice strings use em-dashes. Same code,
+correct on a dev machine, corrupting in a container.
+
+FIX — two options, neither applied yet:
+  a) Upstream: split the call so a rejected `line_buffer` cannot take `encoding`
+     down with it:
+         :io.setopts(opts.io_device, encoding: :utf8)
+         :io.setopts(opts.io_device, line_buffer: true)   # best-effort
+  b) Local: call :io.setopts(:standard_io, encoding: :utf8) in
+     StdioMcp.Application.start/2, which wins regardless of the transport.
+
+DO NOT silence the warning — it is the only signal that the encoding was skipped.
+
+
+--------------------------------------------------------------------------
+2. PATTERN — a fallback returning plausible data is worse than one that fails
+--------------------------------------------------------------------------
+Two instances in TarballIngestion, both fixed 2026-08-04:
+
+  a) markdown_section/2 returned the WHOLE .md file on a missed anchor. ExDoc
+     ships one .md per module containing every member, so all 36 members of
+     Exqlite.Sqlite3NIF resolved to the same 14k document, which chunked into
+     ~12 parts and was stored once per member.
+  b) narrow_to_anchor/2 did the same with the whole HTML page.
+
+SYMPTOM PROFILE — this is the part worth remembering:
+  - no error, no exception, no empty result
+  - row count went UP (exqlite 141 -> 746), which reads as "more coverage"
+  - searches returned 8 of 10 results with byte-identical content
+  - anubis_mcp: 5415 rows holding 1799 distinct texts, 903,346 wasted chars
+
+DETECTION: count DISTINCT content values against row count, WEIGHTED BY LENGTH.
+Row percentage alone is misleading — sqlite_vec showed 46% "duplicate rows" that
+were legitimate (three sibling modules sharing an identical one-line
+"Callback implementation for Ecto.Type.load/1"). The harmful signal is
+duplicated CHARACTERS, not duplicated rows.
+
+FIX: on a missed anchor return "" (markdown -> caller falls through to HTML) or
+[] (HTML -> build_docs degrades to a title-only row). Losing one section beats
+copying a document across every sibling.
+
+RESULT: index went 7243 -> 2772 rows carrying MORE distinct information;
+~955,000 -> 18,474 duplicated characters across all 9 packages.
+
+Note both were written as defensive "don't lose data" fallbacks and both did the
+opposite. Any "if we cannot find X, return the parent/whole thing" deserves a
+distinct-value check before being trusted.
+
+
+--------------------------------------------------------------------------
+3. QUIRK — ExDoc chrome class names differ by generation
+--------------------------------------------------------------------------
+Selectors derived from ONE package silently half-fix the problem.
+
+  icon-action   "View Source"                       modern ExDoc (2024+)
+  view-source   "View Source"                       0.23-era (2021)
+  detail-link   "Link to this function/type/macro"  both
+  hover-link    "Link to this section"              0.23-era
+
+FAILURE: list derived from gen_magic 1.1.1 (ExDoc 0.23), verified against that
+package, shipped. sqlite_vec 0.1.0 (Nov 2024) then kept 18 of 69 rows containing
+"View Source" through a refresh meant to remove it. Took two attempts.
+
+WHY IT MATTERS: these strings are byte-identical across every package, so they
+pull unrelated function docs toward each other in vector space and waste
+embedding tokens. Measured at 49% of rows before removal.
+
+RELATED TRAP: "modern package" does NOT imply "ships markdown". Three ExDoc
+generations vary along TWO independent axes — CSS class naming, and which
+artefacts ship:
+  - no search_data at all (gen_magic 2021): sidebar_items is navigation only,
+    HTML is the sole text source
+  - search_data, no .md (sqlite_vec Nov 2024, lazy_html): text from the JS
+    index, HTML fills gaps
+  - .md + llms.txt (req, exqlite, anubis_mcp): clean markdown available
+
+So the HTML path serves 3 of 9 indexed packages, not the "old packages only"
+long tail it appears to be.
+
+HOW TO APPLY: verify selectors against BOTH an old and a recent package before
+believing a fix. Check tarball contents (.md / llms.txt / search_data /
+sidebar_items counts) to know which path a package will take.
+
+
+--------------------------------------------------------------------------
+4. BUG (live in hex_gh) — `where: fts OR not is_nil(embedding)` disables FTS
+--------------------------------------------------------------------------
+Reduces to `where: not is_nil(embedding)`, so the keyword predicate never
+narrows and the vector ordering scans the whole scoped set.
+
+Found in two codebases, different engines, same logical shape.
+
+SQLite (sqlite-vec), local_hex_mcp — FIXED 2026-08-04:
+    where: d.id in subquery(fts_ids) or (not is_nil(d.embedding) and d.embedding != ""),
+    order_by: [asc: vec_distance_cosine(d.embedding, ^vec)]
+
+Postgres (pgvector), hex_gh — STILL PRESENT, lib/hex_gh/docs/search.ex:
+    where: fragment("? @@ websearch_to_tsquery('english', ?)", d.search_vector, ^q) or
+           fragment("? @@ plainto_tsquery('english', ?)", d.search_vector, ^q) or
+           not is_nil(d.embedding),
+    order_by: [asc: fragment("COALESCE(? <-> ?, 1.0)", d.embedding, ^vec)]
+
+TWO defects in one clause:
+  1. No narrowing. "FTS matches OR anything embedded" = "anything embedded".
+     The FTS candidate step is decorative.
+  2. (SQLite only) The left side admitted rows with a NULL embedding, which
+     reached vec_distance_cosine and RAISED — one legacy NULL row killed every
+     vector search for that package, and a rescue silently degraded it to
+     FTS-only. Postgres does NOT crash because COALESCE(..., 1.0) swallows the
+     NULL, which is exactly why it has gone unnoticed there.
+
+FIX: AND instead of OR; exclude NULL embeddings anywhere a cosine ordering is
+used; fall back to vector-only when the keyword terms match nothing (so a
+nonsense keyword does not mean "no results").
+
+MEASURED on 1288 rows: 94ms (vector over everything) -> 53ms (FTS candidates
+re-ranked). Both a correctness fix and a ~43% latency win.
+
+HOW TO APPLY: read hybrid keyword+vector WHERE clauses as boolean algebra. An OR
+with a near-always-true term silently disables the cheap filter. The symptom is
+"results are vaguely relevant but the keywords seem ignored" — never an error.
+
+
+--------------------------------------------------------------------------
+5. UNRESOLVED — three `remember` calls vanished without a trace
+--------------------------------------------------------------------------
+2026-08-04: three ~2KB entries were accepted
+({"status":"processing","accepted":true}) and never stored. Two were killed by
+an /mcp reconnect ("Connection closed"), one timed out after 1800s. The KB
+stayed at 8.
+
+CRITICAL: they left NO row in `knowledge_decisions`. That table records a row at
+submission and updates it on completion, so these died before the insert —
+earlier in the pipeline than any previously recorded failure.
+
+    SELECT status, inserted_at, updated_at, LENGTH(submitted_text)
+    FROM knowledge_decisions ORDER BY inserted_at
+
+      failed   2026-08-02T20:30:00 -> 20:30:22    200 chars
+      applied  2026-08-02T20:30:30 -> 20:30:45    200 chars   <- same size, 30s later, OK
+      failed   2026-08-02T20:35:09 -> 20:35:29    877 chars
+      failed   2026-08-02T20:36:37 -> 20:36:57    573 chars
+      applied  2026-08-03T07:29:09 -> 07:29:33   2929 chars   <- 2.9KB SUCCEEDED
+      applied  2026-08-03T15:58:57 -> 15:59:48   2393 chars   <- 2.4KB SUCCEEDED
+      applied  2026-08-04T15:56:09 -> 15:56:11     46 chars
+      applied  2026-08-04T15:58:35 -> 15:58:43     66 chars
+
+THEORIES TESTED AND REFUTED — record them so they are not re-tried:
+  1. Mistral credits / model access. NO: a novel short entry fired
+     mistral-small (46 -> 126 tokens), a near-duplicate fired mistral-large
+     (1167 -> 309) and correctly returned `discard`. Both under a second.
+  2. Content size. NO: 2929- and 2393-char entries succeeded on 2026-08-03,
+     and a 200-char entry failed on 2026-08-02.
+  3. The merge path / mistral-large. NO: the Aug 2 failures have
+     top_similarity = nil, so they failed before the neighbour search.
+  4. Contention with bulk ingestion. NO: the failures predate this session's
+     refreshes by two days.
+  5. Parallel submission. UNTESTED — the three lost calls today were submitted
+     back to back, which the successful ones were not. This is the only
+     surviving hypothesis and the cheapest next test: fire three ~2KB entries
+     simultaneously and see whether any decision rows appear.
+
+The Aug 2 failures are a SEPARATE, transient issue:
+%Req.TransportError{reason: :timeout} on all three, with an identical-size entry
+succeeding 30 seconds later. Network flake, worth a retry-on-timeout regardless.
+
+PROPOSED FIX (sidesteps the diagnosis rather than depending on it):
+  Accept an ARRAY of inputs. Embed them all in one `Client.embed_batch/1` call —
+  which already has 429 backoff with Retry-After, 400 token-limit bisection and
+  the nil-vector guard, i.e. exactly the robustness this path lacks. Then
+  enumerate SEQUENTIALLY, one mistral-large call per {input, neighbours}.
+
+  Sequencing is load-bearing, not incidental: entry 2 must see the KB including
+  entry 1 if it was just stored. Batch-embedding then curating in parallel would
+  reintroduce the failure AND break dedup — two near-identical submissions would
+  each see no neighbour and both create.
+
+  Partial failure needs an explicit rule: if entry 2 fails, 1 is applied and 3
+  has not run. Continue-and-report-per-entry is probably right, but decide it.
+
+  Still async: Anubis' session call gives up at 30s and N sequential
+  mistral-large calls will exceed that. So write all N decision rows BEFORE the
+  embedding call and return the request_ids — that turns fire-and-forget into an
+  observable contract and closes the reporting gap in the same change.
+
+FIX REGARDLESS OF ROOT CAUSE — the reporting gap is the real defect:
+  a) `remember` must return the final outcome, or implement lookup by
+     request_id. The tool's own note promises "Look up this request_id to see
+     what was actually done", which appears unimplemented — and in the 2026-08-04
+     case there would have been nothing to look up anyway.
+  b) Write the decision row BEFORE any network call, so a job that dies early
+     still leaves evidence. Today's three left none, which is why four separate
+     theories were possible.
+  c) Retry the embedding on :timeout. The ingestion path has 429 backoff and
+     400 bisection; this path has neither.
+
+
+Worth noting the batch design makes three separate problems collapse into one change:
+
+- the vanishing entries — one embed request instead of N concurrent ones, whatever the actual cause was
+- the missing retry — inherited from embed_batch/1 rather than written again
+- the reporting gap — N rows written up front means N queryable request_ids, so "accepted" stops being indistinguishable from "lost"
+
+And it makes remember match how search_docs already works: batch the embeddings, serialise the expensive per-item step, 
+write state before the network call.
+The ingestion path learned all three of those the hard way today.
