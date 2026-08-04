@@ -1,5 +1,16 @@
 defmodule StdioMcp.Tools.SearchGithubIssues do
-  @moduledoc "Search GitHub issues and pull requests within an organization."
+  @moduledoc """
+  Search open and closed GitHub issues and pull requests within an organization
+  (e.g. `org: "phoenixframework"`).
+
+  This is a **live query against the GitHub API** — nothing is stored locally and
+  results reflect the repository as it is now. That makes it the right tool for
+  "is this a known bug", "was this fixed upstream", or "has anyone hit this
+  error", where documentation cannot help because the behaviour is unreleased,
+  undocumented or contested.
+
+  Rate limits apply unauthenticated; set `GITHUB_TOKEN` to raise them.
+  """
 
   use Anubis.Server.Component, type: :tool
 

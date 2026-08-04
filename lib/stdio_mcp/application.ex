@@ -23,6 +23,7 @@ defmodule StdioMcp.Application do
         # holds every caller waiting on it.
         {Registry, keys: :unique, name: StdioMcp.IngestionRegistry},
         {Registry, keys: :duplicate, name: StdioMcp.IngestionWaiters},
+        StdioMcp.Docs.RepairBudget,
         {Task.Supervisor, name: StdioMcp.TaskSupervisor}
       ] ++ mcp_children()
 

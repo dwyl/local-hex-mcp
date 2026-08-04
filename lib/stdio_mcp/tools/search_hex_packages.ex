@@ -1,5 +1,14 @@
 defmodule StdioMcp.Tools.SearchHexPackages do
-  @moduledoc "Search Hex.pm packages by keyword. Returns top results sorted by downloads."
+  @moduledoc """
+  Search Hex.pm for packages by keyword, sorted by downloads.
+
+  This finds *which* package to use — name, description, download counts, links.
+  It does not read documentation: once you know the package name, use
+  `search_docs` with `package:` set, which fetches and indexes its docs.
+
+  Reach for it when evaluating options ("what do people use for HTTP in
+  Elixir?"), or to confirm a package's exact name before searching its docs.
+  """
 
   use Anubis.Server.Component, type: :tool
 

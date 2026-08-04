@@ -44,7 +44,12 @@ config :stdio_mcp,
   embed_batch_size: env_int.("EMBED_BATCH_SIZE", 200),
   # Concurrent embedding requests. Bounded by the Finch pool (size 10) and the
   # provider's rate limit — not by CPU count.
-  embed_concurrency: env_int.("EMBED_CONCURRENCY", 2)
+  embed_concurrency: env_int.("EMBED_CONCURRENCY", 2),
+  # Pause after each embedding request, for providers that limit
+  # requests-per-second. 0 (the default) means no pacing at all, which is what a
+  # capable endpoint wants; raise it only if 429s persist after lowering
+  # concurrency.
+  embed_pause_ms: env_int.("EMBED_PAUSE_MS", 0)
 
 repo_overrides =
   [load_extensions: [SqliteVec.path()]] ++

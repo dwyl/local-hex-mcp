@@ -1,5 +1,15 @@
 defmodule StdioMcp.Tools.GetTokenUsage do
-  @moduledoc "Get total AI token consumption statistics stored in the database."
+  @moduledoc """
+  Report AI token consumption recorded in the local database, broken down by
+  model and request type.
+
+  Useful before or after a large ingestion — `search_docs` with `refresh: true`
+  on a big package embeds every document — and for answering "what has this cost
+  so far". Totals are cumulative and persist across restarts.
+
+  Optional `model`, `from` and `until` (e.g. `"2026-08-01"`) narrow the range; an
+  unparseable date is ignored rather than rejected.
+  """
 
   use Anubis.Server.Component, type: :tool
   import Ecto.Query

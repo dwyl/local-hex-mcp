@@ -1,5 +1,22 @@
 defmodule StdioMcp.Tools.Recall do
-  @moduledoc "Search the knowledge base for relevant technical learnings."
+  @moduledoc """
+  Search this project's local knowledge base for past pain points, architectural
+  decisions and bug fixes previously saved with `remember`.
+
+  Call it **before** attempting a fix, not after — its value is avoiding a repeat
+  of an investigation someone already finished:
+
+    * on any command or test failure, search the error message with
+      `kind: "pain_point"`;
+    * on a second iteration — if the first edit did not fix the error, search the
+      specific function or module before editing again;
+    * before changing infrastructure config (`runtime.exs`, `docker-compose.yml`,
+      Caddyfile, OAuth settings), where past attempts are often already recorded.
+
+  Optional filters: `kind` (`pain_point`, `pattern`, `decision`, `package_note`)
+  and `package`. This searches locally recorded experience, not package
+  documentation — for docs use `search_docs`.
+  """
 
   use Anubis.Server.Component, type: :tool
 

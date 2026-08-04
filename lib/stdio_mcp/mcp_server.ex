@@ -10,6 +10,7 @@ defmodule StdioMcp.MCPServer do
   component(StdioMcp.Tools.SearchHexPackages)
   component(StdioMcp.Tools.SearchGithubIssues)
   component(StdioMcp.Tools.SearchDocs)
+  component(StdioMcp.Tools.ListIndexedPackages)
   component(StdioMcp.Tools.Remember)
   component(StdioMcp.Tools.Recall)
   component(StdioMcp.Tools.GetTokenUsage)

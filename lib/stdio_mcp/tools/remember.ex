@@ -1,5 +1,23 @@
 defmodule StdioMcp.Tools.Remember do
-  @moduledoc "Save a technical learning or pain point to the knowledge base."
+  @moduledoc """
+  Save a technical learning or pain point to this project's local knowledge base,
+  retrievable later with `recall`.
+
+  Call it **after** a fix, and only when the fix is worth recording:
+
+    * **two or more attempts** — the first edit did not work. One-attempt fixes
+      (typos, syntax errors, missing imports) are noise and dilute the base.
+    * **cross-layer causes** — the problem spanned two or more layers, e.g.
+      reverse proxy plus application, container networking plus database, config
+      provider plus release.
+    * **version quirks** — undocumented behaviour or a version constraint in a
+      dependency.
+
+  Record *why* it happened and *how to apply* the lesson, not only what changed:
+  an entry that cannot be acted on next time is not worth storing. Curation runs
+  asynchronously and may merge, append to, replace or discard what you submit, so
+  the stored result can differ from the text sent.
+  """
 
   use Anubis.Server.Component, type: :tool
 

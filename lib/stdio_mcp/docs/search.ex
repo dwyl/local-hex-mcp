@@ -2,55 +2,96 @@ defmodule StdioMcp.Docs.Search do
   @moduledoc "Hybrid FTS5 + sqlite-vec vector search over package docs."
   import Ecto.Query
   import SqliteVec.Ecto.Query
+  alias StdioMcp.Docs.HexPackage
   alias StdioMcp.Docs.IngestionJob
+  alias StdioMcp.Docs.RepairBudget
   alias StdioMcp.Docs.TarballIngestion
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
   require Logger
 
+  @typedoc "Human-readable messages returned alongside results."
+  @type notices :: [String.t()]
+
+  @typedoc """
+  The version an ingestion actually resolved to. `nil` when the answer came from
+  cache, because no resolution took place.
+  """
+  @type resolved_version :: String.t() | nil
+
+  # Answering across every indexed package is worse than not answering. A query
+  # naming a package we have never ingested still matches rows in unrelated
+  # packages that share keywords — asking about `poolboy` returned
+  # `GenMagic.Pool.Poolboy` and `Boruta.Oauth.Scopes.public/0`, with nothing in
+  # the payload to say poolboy had never been looked up. A caller cannot tell
+  # that apart from a real answer, so refuse rather than mislead.
+  @no_package_notice "No package given, so no search was run. search_docs answers " <>
+                       "within a single package: pass the Hex package name as " <>
+                       "`package` (e.g. package: \"phoenix\"), which also triggers " <>
+                       "ingestion when it is not indexed yet."
+
+  @spec search(String.t(), keyword()) :: {[%StdioMcp.PackageDoc{}], notices()}
   def search(query, opts \\ []) when is_binary(query) do
-    package = Keyword.get(opts, :package)
-    version = Keyword.get(opts, :version)
+    case opts |> Keyword.get(:package) |> presence() do
+      nil -> {[], [@no_package_notice]}
+      package -> search_package(query, package, opts)
+    end
+  end
+
+  @spec search_package(String.t(), String.t(), keyword()) :: {[%StdioMcp.PackageDoc{}], notices()}
+  defp search_package(query, package, opts) do
+    # Normalised once, here, so `version` has a single meaning everywhere below.
+    # Previously `nil` meant "latest" on the ingestion branch and "apply no
+    # filter" on the query branch, which is how a cached search silently
+    # interleaved every stored version of a package.
+    version = opts |> Keyword.get(:version) |> presence() || "latest"
+
     refresh = Keyword.get(opts, :refresh, false)
     examples_only = Keyword.get(opts, :include_examples_only, false)
     embedding = Keyword.get(opts, :embedding)
     limit = Keyword.get(opts, :limit, 10)
 
-    {notices, resolved_version} = ensure_ingested(package, version, refresh, query)
-
-    base_query = from(d in PackageDoc)
+    {notices, resolved_version} = ensure_ingested(package, version, refresh)
 
     base_query =
-      if package && package != "" do
-        from(d in base_query, where: d.package == ^package)
-      else
-        base_query
-      end
-
-    # Prefer the version ingestion actually resolved: asking for "latest" and
-    # filtering on the literal string matches nothing, and without a filter
-    # results from several stored versions get mixed together.
-    version_filter = resolved_version || version
-
-    base_query =
-      if is_binary(version_filter) and version_filter != "" and version_filter != "latest" do
-        from(d in base_query, where: d.version == ^version_filter)
-      else
-        base_query
-      end
-
-    base_query =
-      if examples_only do
-        from(d in base_query, where: not is_nil(d.code_snippet) and d.code_snippet != "")
-      else
-        base_query
-      end
+      from(d in PackageDoc)
+      |> scope_package(package)
+      |> scope_version(resolved_version || version)
+      |> scope_examples(examples_only)
 
     {results, query_notices} = run_query(base_query, query, embedding, limit)
     {results, notices ++ query_notices}
   end
 
+  defp scope_package(query, package), do: from(d in query, where: d.package == ^package)
+
+  # Docs are stored under the version ingestion resolved, so "latest" is never a
+  # stored value — as a filter it can only mean "no filter". An ingestion that
+  # just ran reports its resolved version and takes precedence, which is what
+  # scopes a first-time search to the version it just wrote.
+  defp scope_version(query, "latest"), do: query
+  defp scope_version(query, version), do: from(d in query, where: d.version == ^version)
+
+  defp scope_examples(query, false), do: query
+
+  defp scope_examples(query, true),
+    do: from(d in query, where: not is_nil(d.code_snippet) and d.code_snippet != "")
+
+  # Blank and non-binary both collapse to nil, so every caller below tests
+  # presence with a plain nil check rather than repeating `x && x != ""`.
+  @spec presence(term()) :: String.t() | nil
+  defp presence(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp presence(_value), do: nil
+
   # Hybrid: FTS5 candidates + vector re-ranking
+  @spec run_query(Ecto.Query.t(), String.t(), list() | String.t() | nil, pos_integer()) ::
+          {[%StdioMcp.PackageDoc{}], notices()}
   defp run_query(base_query, query, vec, limit) when is_list(vec) or is_binary(vec) do
     vec_param = if is_list(vec), do: Jason.encode!(vec), else: vec
     sanitized = sanitize_fts(query)
@@ -136,6 +177,7 @@ defmodule StdioMcp.Docs.Search do
   end
 
   # Sanitize query for FTS5: strip punctuation, join with OR
+  @spec sanitize_fts(String.t()) :: String.t()
   defp sanitize_fts(query) do
     query
     |> String.replace(~r/[^\w\s]/, " ")
@@ -143,56 +185,233 @@ defmodule StdioMcp.Docs.Search do
     |> Enum.join(" OR ")
   end
 
-  defp ensure_ingested(package, version, refresh, _query) do
-    cond do
-      is_nil(package) or package == "" -> {[], nil}
-      refresh -> maybe_auto_ingest(package, true, version)
-      true -> maybe_auto_ingest(package, false, version)
+  # Ingestion decision. `package` is a non-blank binary and `requested` is either
+  # "latest" or a concrete version — `search/2` guarantees both.
+  #
+  # One version per package is the invariant, so this never has to choose between
+  # stored versions; it decides whether what is stored is the version we want and
+  # whether it is complete.
+  @spec ensure_ingested(String.t(), String.t(), boolean()) :: {notices(), resolved_version()}
+
+  # `refresh: true` is the escape hatch and overrides every rule below: resolve a
+  # target and re-ingest it, whatever is stored.
+  defp ensure_ingested(package, requested, true) do
+    case resolve_target(package, requested) do
+      {:ok, target, docs_url} ->
+        Logger.info("[Docs.Search] refresh requested for #{package} (#{target})")
+        ingest(package, target, docs_url)
+
+      {:error, notices} ->
+        {notices, nil}
     end
   end
 
-  defp maybe_auto_ingest(package, refresh, version) do
-    target_version = normalize_version(version)
+  defp ensure_ingested(package, requested, false) do
+    decide(package, requested, stored_version(package))
+  end
 
-    if not refresh and already_ingested?(package, target_version) do
-      {incomplete_notices(package, target_version), nil}
+  # Nothing stored: resolve and ingest.
+  defp decide(package, requested, nil) do
+    case resolve_target(package, requested) do
+      {:ok, target, docs_url} -> ingest(package, target, docs_url)
+      {:error, notices} -> {notices, nil}
+    end
+  end
+
+  # An explicit version that is already the stored one needs no Hex lookup at
+  # all: it demonstrably exists, because we ingested it. This is the fully-cached
+  # path and it makes no network call.
+  defp decide(package, stored, stored) do
+    serve_or_repair(package, stored, nil)
+  end
+
+  defp decide(package, requested, stored) when requested != "latest" do
+    Logger.info("[Docs.Search] switching #{package} from #{stored} to #{requested}")
+
+    case resolve_target(package, requested) do
+      {:ok, target, docs_url} -> ingest(package, target, docs_url)
+      {:error, notices} -> {notices, nil}
+    end
+  end
+
+  # "latest" with something already stored. The version this project actually
+  # runs wins when the package is one of our dependencies — that is the version
+  # the caller's code executes against, and it costs no request to learn.
+  defp decide(package, "latest", stored) do
+    case app_version(package) do
+      ^stored -> serve_or_repair(package, stored, nil)
+      _other -> compare_with_hex(package, stored)
+    end
+  end
+
+  # A stored version that differs from the current release is reported, not
+  # replaced. Auto-switching would make one unpinned search discard a pinned
+  # version and force a full re-embed to get it back.
+  defp compare_with_hex(package, stored) do
+    case HexPackage.fetch(package) do
+      {:ok, meta} ->
+        case HexPackage.latest(meta) do
+          ^stored ->
+            serve_or_repair(package, stored, meta.docs_url)
+
+          nil ->
+            serve_or_repair(package, stored, meta.docs_url)
+
+          newer ->
+            {[version_notice(package, stored, newer)] ++ incomplete_notices(package, stored),
+             stored}
+        end
+
+      {:error, _reason} ->
+        # Hex unreachable: serve what we have rather than fail the search.
+        serve_or_repair(package, stored, nil)
+    end
+  end
+
+  # Complete data is served as-is. Incomplete data is worth re-ingesting, but
+  # only within budget: repair was once unbounded and a package that could not be
+  # re-embedded re-downloaded its tarball on every single search forever.
+  defp serve_or_repair(package, version, docs_url) do
+    case missing_embeddings(package, version) do
+      0 ->
+        RepairBudget.clear(package, version)
+        {[], version}
+
+      missing ->
+        if RepairBudget.allow?(package, version) do
+          Logger.info(
+            "[Docs.Search] repairing #{package} #{version} (#{missing} rows unembedded)"
+          )
+
+          ingest(package, version, docs_url)
+        else
+          {[repair_exhausted_notice(package, version, missing)], version}
+        end
+    end
+  end
+
+  # Resolves what to ingest, and refuses a version Hex does not publish rather
+  # than discovering it as a 404 on the tarball.
+  @spec resolve_target(String.t(), String.t()) ::
+          {:ok, String.t(), String.t() | nil} | {:error, notices()}
+  defp resolve_target(package, requested) do
+    case HexPackage.fetch(package) do
+      {:ok, meta} -> target_from(meta, package, requested)
+      {:error, :not_found} -> {:error, ["No such package on Hex: '#{package}'."]}
+      {:error, reason} -> {:error, ["Could not reach Hex for '#{package}': #{inspect(reason)}."]}
+    end
+  end
+
+  defp target_from(meta, package, "latest") do
+    case app_version(package) || HexPackage.latest(meta) do
+      nil -> {:error, ["Hex lists no releases for '#{package}'."]}
+      target -> {:ok, target, meta.docs_url}
+    end
+  end
+
+  defp target_from(meta, package, requested) do
+    if HexPackage.published?(meta, requested) do
+      {:ok, requested, meta.docs_url}
     else
-      Logger.info("[Docs.Search] auto-ingesting docs for package: #{package} (#{target_version})")
-      run_ingestion(package, target_version)
+      {:error, [unpublished_notice(package, requested, meta.versions)]}
     end
   end
 
-  defp normalize_version(version) when is_binary(version) and version != "", do: version
-  defp normalize_version(_version), do: "latest"
+  # Behind and ahead are different situations and must not read the same. The
+  # stored version can be *newer* than the latest stable — a pre-release, like
+  # boruta 3.0.0-beta.4 against a stable 2.3.8. Calling the stable "current"
+  # there tells the reader they are stale when they are ahead, and the obvious
+  # next action (refresh) silently downgrades them.
+  defp version_notice(package, stored, latest) do
+    case safe_compare(stored, latest) do
+      :lt ->
+        "Indexed '#{package}' is v#{stored}; v#{latest} is now the latest stable. " <>
+          "Nothing was changed — pass refresh: true to move to v#{latest}."
 
-  # Docs are stored under the resolved version, so "latest" can never match a
-  # stored value; the presence of rows for the package is the real test.
-  defp doc_scope(package, "latest"), do: from(d in PackageDoc, where: d.package == ^package)
+      :gt ->
+        "Indexed '#{package}' is v#{stored}, which is ahead of the latest stable " <>
+          "v#{latest} (a pre-release). Nothing was changed. Keep using it as-is; " <>
+          "refresh: true without a version would move you *back* to v#{latest}, so " <>
+          "pass version: \"#{stored}\" if you refresh."
 
-  defp doc_scope(package, version),
-    do: from(d in PackageDoc, where: d.package == ^package and d.version == ^version)
+      _eq_or_unknown ->
+        "Indexed '#{package}' is v#{stored}; Hex reports v#{latest}. Nothing was changed."
+    end
+  end
 
-  defp already_ingested?(package, version), do: Repo.exists?(doc_scope(package, version))
+  # Hex versions are semver in practice but not guaranteed to parse, and a
+  # comparison failure must not take down a search that was otherwise fine.
+  defp safe_compare(a, b) do
+    Version.compare(a, b)
+  rescue
+    Version.InvalidVersionError -> :unknown
+  end
+
+  defp unpublished_notice(package, requested, versions) do
+    known = versions |> Enum.take(8) |> Enum.join(", ")
+
+    "Version '#{requested}' is not published for '#{package}'. Recent releases: #{known}."
+  end
+
+  defp repair_exhausted_notice(package, version, missing) do
+    "Docs for '#{package}' v#{version} have #{missing} entries with no embedding and " <>
+      "#{RepairBudget.max_attempts()} repair attempts already failed — not retrying. " <>
+      "Check the embedding API, then pass refresh: true."
+  end
+
+  # The version this project runs, when the package is one of its dependencies.
+  # Local, free, and authoritative for the caller's own code. `to_existing_atom`
+  # rather than `to_atom`: package names arrive from tool input and atoms are
+  # never collected.
+  @spec app_version(String.t()) :: String.t() | nil
+  defp app_version(package) do
+    case :application.get_key(String.to_existing_atom(package), :vsn) do
+      {:ok, vsn} -> to_string(vsn)
+      :undefined -> nil
+    end
+  rescue
+    ArgumentError -> nil
+  end
+
+  @spec stored_version(String.t()) :: String.t() | nil
+  defp stored_version(package) do
+    Repo.one(from(d in PackageDoc, where: d.package == ^package, select: d.version, limit: 1))
+  end
+
+  @spec missing_embeddings(String.t(), String.t()) :: non_neg_integer()
+  defp missing_embeddings(package, version) do
+    Repo.aggregate(
+      from(d in PackageDoc,
+        where: d.package == ^package and d.version == ^version and is_nil(d.embedding)
+      ),
+      :count
+    )
+  end
+
+  defp ingest(package, version, docs_url) do
+    RepairBudget.record_attempt(package, version)
+
+    TarballIngestion
+    |> IngestionJob.run(package, version, ingest_timeout(), fn ->
+      TarballIngestion.ingest(package, version, docs_url)
+    end)
+    |> handle_ingest_result(package)
+  end
 
   # A row with a nil embedding is invisible to vector search while still
   # counting as indexed, so this damage is otherwise undetectable from a search.
-  #
-  # Treating it as "not ingested" and repairing automatically was tried and is
-  # worse: a package that *cannot* be re-embedded — rate limit, missing key —
-  # re-downloads the tarball and fails again on every single search, never
-  # converging. Naming the damage costs one COUNT and leaves the expensive
-  # repair to an explicit `refresh: true`.
+  # Used where repair is not attempted — the budget is spent, or the stored
+  # version is not the one being compared against.
+  @spec incomplete_notices(String.t(), String.t()) :: notices()
   defp incomplete_notices(package, version) do
-    scope = doc_scope(package, version)
-
-    case Repo.aggregate(from(d in scope, where: is_nil(d.embedding)), :count) do
+    case missing_embeddings(package, version) do
       0 ->
         []
 
       missing ->
         [
-          "Docs for '#{package}' have #{missing} entries with no embedding — those are " <>
-            "invisible to vector search. Pass refresh: true to re-ingest the package."
+          "Docs for '#{package}' v#{version} have #{missing} entries with no embedding — " <>
+            "those are invisible to vector search. Pass refresh: true to re-ingest."
         ]
     end
   end
@@ -218,19 +437,13 @@ defmodule StdioMcp.Docs.Search do
     Application.get_env(:stdio_mcp, :ingest_timeout_ms, @default_ingest_timeout)
   end
 
-  defp run_ingestion(package, target_version) do
-    TarballIngestion
-    |> IngestionJob.run(package, target_version, ingest_timeout(), fn ->
-      TarballIngestion.ingest(package, target_version)
-    end)
-    |> handle_ingest_result(package)
-  end
-
   # Ingestion reports success in two shapes: {:ok, count, version} and
   # {:ok, count}. Both are matched, plus a catch-all — matching only one of them
   # is how a successful ingest previously raised CaseClauseError *after* writing
   # the rows. Returning the resolved version lets the caller scope results to the
   # version that was just indexed.
+  @spec handle_ingest_result(IngestionJob.outcome(), String.t()) ::
+          {notices(), resolved_version()}
   defp handle_ingest_result({:ok, {:ok, count, resolved_version}}, package) do
     {["Docs for '#{package}' v#{resolved_version} were just indexed (#{count} docs)."],
      resolved_version}

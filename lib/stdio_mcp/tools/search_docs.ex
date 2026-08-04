@@ -1,5 +1,40 @@
 defmodule StdioMcp.Tools.SearchDocs do
-  @moduledoc "Search Hex package documentation, typespecs, and code examples."
+  @moduledoc """
+  Search official HexDocs documentation, typespecs, guides and code examples for
+  a single Hex package, with keyword and semantic (vector) ranking.
+
+  Prefer this over grepping `deps/` when:
+
+    * the package is **not installed** — evaluating a library before adding it to
+      mix.exs, where there is nothing on disk to grep;
+    * you do not know the keyword — semantic ranking finds "how do I avoid
+      re-embedding" when the docs actually say `chunk_overlap`;
+    * you need a **citable URL** — results carry the exact `hexdocs_url`;
+    * you need a version you do not have installed.
+
+  Prefer `grep` on `deps/` when the package *is* installed and you want a
+  function signature, an implementation detail, or surrounding context: the
+  source is faster to reach and is the authority, and hex packages ship their
+  README there too.
+
+  Results are always scoped to **one package**, so a question spanning several is
+  several calls: issue one per package and consolidate the answers yourself
+  rather than asking the user to. Write a distinct query for each, using the
+  terms that package's own docs would use — sending the same sentence to both
+  matches neither well. Keep the package name out of `query`; it is already
+  scoped by `package`, and repeating it only adds noise to the keyword search and
+  dilutes the query embedding.
+
+  When the calling project depends on the package, read its locked version from
+  `mix.lock` and pass it as `version`. Omitting it does not fall back to that
+  project — this server cannot see its lockfile, and resolves `"latest"` from its
+  own dependencies or Hex's latest stable release, which may be a different major
+  line. Omit `version` only when nothing local pins the package, such as when
+  evaluating a library you have not adopted.
+
+  Read the `notices` field: it reports version drift, ingestion still running,
+  and missing embeddings, and each notice names the argument to change.
+  """
 
   # Left at the `:forbidden` default deliberately. Declaring
   # `task_support: :optional` was probed on 2026-08-03 against anubis_mcp v1.14.0:
@@ -21,8 +56,9 @@ defmodule StdioMcp.Tools.SearchDocs do
     )
 
     field(:package, :string,
+      required: true,
       description:
-        "Optional Hex package name filter (e.g. 'boruta', 'anubis_mcp', 'phoenix', 'ecto', 'req'). Supplying a package auto-ingests its docs from Hex.pm if not yet indexed."
+        "Hex package name to search within (e.g. 'boruta', 'anubis_mcp', 'phoenix', 'ecto', 'req'). Searches are always scoped to one package — a cross-package search answers with rows from unrelated packages that merely share keywords, which is indistinguishable from a real answer. Also triggers ingestion from Hex.pm when the package is not indexed yet, so name the package even when unsure whether it is present."
     )
 
     field(:version, :string,
