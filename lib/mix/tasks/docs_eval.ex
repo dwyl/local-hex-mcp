@@ -79,6 +79,14 @@ defmodule Mix.Tasks.Docs.Eval do
       is a distractor the cross-encoder can mis-promote and nothing it can find.
     * `--limit` — cut-off for recall@k (default 5)
     * `--verbose` — per-query rank table
+    * `--judged` — score against `priv/eval/judgements.md` instead of the
+      expectations: `P@k` (what fraction of a returned page is useful) and
+      `any-relevant`. Expectations mark at most one row and so cannot tell a
+      wholly on-topic result set from one lucky substring match.
+    * `--show N` — print the top N documents each query actually returns, with
+      the ones counted as relevant marked. Ranks alone cannot show that an
+      expectation is satisfied by a document that answers nothing, which is how
+      two bad expectations survived several rounds of measurement here.
   """
 
   use Mix.Task
@@ -88,6 +96,7 @@ defmodule Mix.Tasks.Docs.Eval do
 
   alias StdioMcp.AI.Client
   alias StdioMcp.Docs.Fusion
+  alias StdioMcp.Docs.Judgements
   alias StdioMcp.Docs.QuerySanitizer
   alias StdioMcp.Docs.Reranker
   alias StdioMcp.PackageDoc
@@ -323,6 +332,12 @@ defmodule Mix.Tasks.Docs.Eval do
     }
   ]
 
+  @doc """
+  The query set, exposed so `mix docs.judge` scores the same questions rather
+  than keeping a second copy that drifts.
+  """
+  def queries, do: @queries
+
   @all_modes [:fts, :vector, :hybrid, :rrf]
 
   @impl Mix.Task
@@ -336,7 +351,9 @@ defmodule Mix.Tasks.Docs.Eval do
           candidates: :integer,
           rerank_depth: :integer,
           limit: :integer,
-          verbose: :boolean
+          verbose: :boolean,
+          show: :integer,
+          judged: :boolean
         ]
       )
 
@@ -348,7 +365,9 @@ defmodule Mix.Tasks.Docs.Eval do
       candidates: Keyword.get(opts, :candidates, 15),
       rerank_depth: Keyword.get(opts, :rerank_depth, 10),
       limit: Keyword.get(opts, :limit, 5),
-      verbose?: Keyword.get(opts, :verbose, false)
+      verbose?: Keyword.get(opts, :verbose, false),
+      show: Keyword.get(opts, :show, 0),
+      judged?: Keyword.get(opts, :judged, false)
     }
 
     {resolved, broken} = opts |> select_queries() |> resolve_ground_truth()
@@ -682,7 +701,43 @@ defmodule Mix.Tasks.Docs.Eval do
       section("#{kind} (#{length(evals)})", evals, modes, config)
     end
 
+    if config.judged?, do: judged_report(evaluations, List.last(modes), config)
     if config.verbose?, do: detail(evaluations, modes, config)
+    if config.show > 0, do: show_results(evaluations, List.last(modes), config)
+  end
+
+  # Ranks are a proxy and a proxy cannot be audited by eye. `[boruta] PKCE`
+  # scored a rank-1 hit while the document returned was a typespec listing
+  # `pkce: boolean()` among thirty fields — technically in the relevant set,
+  # useless as an answer. This prints what a caller would actually receive, with
+  # the ones counted as relevant marked, so the expectation itself can be judged
+  # rather than trusted.
+  defp show_results(evaluations, mode, config) do
+    Mix.shell().info("\n" <> String.duplicate("=", 78))
+    Mix.shell().info("WHAT THE CALLER ACTUALLY GETS  ·  #{mode}  ·  top #{config.show}\n")
+
+    Enum.each(evaluations, fn %{query: q} = e ->
+      Mix.shell().info("#{q.kind |> to_string() |> String.upcase()}  [#{q.package}]  #{q.query}")
+      Mix.shell().info("  expect #{inspect(q.expect)}")
+
+      e.runs
+      |> Map.fetch!(mode)
+      |> Map.fetch!(:ids)
+      |> Enum.take(config.show)
+      |> hydrate()
+      |> Enum.with_index(1)
+      |> Enum.each(fn {doc, i} ->
+        mark = if MapSet.member?(q.relevant, doc.id), do: "✓", else: " "
+
+        excerpt =
+          doc.content |> to_string() |> String.replace(~r/\s+/, " ") |> String.slice(0, 96)
+
+        Mix.shell().info("  #{mark} #{i}. #{String.slice(to_string(doc.signature), 0, 58)}")
+        Mix.shell().info("      #{excerpt}")
+      end)
+
+      Mix.shell().info("")
+    end)
   end
 
   # BM25 is collection-global: FTS5's `bm25()` uses corpus-wide document
@@ -762,6 +817,89 @@ defmodule Mix.Tasks.Docs.Eval do
     Mix.shell().info("")
     _ = config
   end
+
+  # Scores against human judgements instead of the single-target expectations.
+  #
+  # `P@5` is the number the expectations could never report: what fraction of a
+  # returned page is actually useful. An expectation marks at most one row, so it
+  # cannot distinguish a result set where every row is on topic from one where a
+  # single lucky row matched a substring — which is precisely the complaint that
+  # produced this mode.
+  #
+  # Unjudged rows are excluded from both numerator and denominator rather than
+  # counted against the system, so a partly-marked file reports honestly on what
+  # it knows. `coverage` says how much that is.
+  defp judged_report(evaluations, mode, config) do
+    judgements = Judgements.load()
+
+    if map_size(judgements) == 0 do
+      Mix.shell().error(
+        "Nothing marked in #{Judgements.path()} yet. Generate it with `mix docs.judge`, " <>
+          "then change `?` to `y` or `n` on the results you have an opinion about — " <>
+          "partial marking is fine, coverage is reported.\n"
+      )
+    else
+      scored =
+        Enum.map(evaluations, fn e ->
+          docs =
+            e.runs |> Map.fetch!(mode) |> Map.fetch!(:ids) |> Enum.take(config.limit) |> hydrate()
+
+          verdicts =
+            Enum.map(
+              docs,
+              &Judgements.verdict(judgements, e.query.query, &1.package, &1.hexdocs_url)
+            )
+
+          %{kind: e.query.kind, verdicts: verdicts}
+        end)
+
+      Mix.shell().info("\njudged relevance · #{mode} · top #{config.limit}\n")
+      judged_section("all", scored)
+
+      for kind <- [:concept, :symbol] do
+        case Enum.filter(scored, &(&1.kind == kind)) do
+          [] -> :ok
+          subset -> judged_section("#{kind} (#{length(subset)})", subset)
+        end
+      end
+    end
+  end
+
+  defp judged_section(label, scored) do
+    all = Enum.flat_map(scored, & &1.verdicts)
+    known = Enum.reject(all, &(&1 == :unjudged))
+
+    precision =
+      scored
+      |> Enum.map(fn %{verdicts: v} ->
+        case Enum.reject(v, &(&1 == :unjudged)) do
+          [] -> nil
+          judged -> Enum.count(judged, &(&1 == :yes)) / length(judged)
+        end
+      end)
+      |> Enum.reject(&is_nil/1)
+      |> mean_of()
+
+    # Restricted to queries with at least one judgement, exactly like P@k. Averaged
+    # over every query it silently reports "0.04" for a partly-marked file, which
+    # reads as catastrophic failure rather than as absent data.
+    success =
+      scored
+      |> Enum.filter(fn %{verdicts: v} -> Enum.any?(v, &(&1 != :unjudged)) end)
+      |> Enum.map(fn %{verdicts: v} -> bool(:yes in v) end)
+      |> mean_of()
+
+    coverage = if all == [], do: 0.0, else: length(known) / length(all)
+
+    Mix.shell().info(
+      String.pad_trailing(label, 16) <>
+        "P@k " <>
+        pad(precision) <> "   any-relevant " <> pad(success) <> "   coverage " <> pad(coverage)
+    )
+  end
+
+  defp mean_of([]), do: 0.0
+  defp mean_of(list), do: Enum.sum(list) / length(list)
 
   # -- metrics -----------------------------------------------------------------
 

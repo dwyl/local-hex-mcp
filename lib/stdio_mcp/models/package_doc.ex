@@ -12,6 +12,7 @@ defmodule StdioMcp.PackageDoc do
     field(:content, :string)
     field(:code_snippet, :string)
     field(:hexdocs_url, :string)
+    field(:source_url, :string)
     field(:embedding, :string)
 
     timestamps()
@@ -29,6 +30,7 @@ defmodule StdioMcp.PackageDoc do
       :content,
       :code_snippet,
       :hexdocs_url,
+      :source_url,
       :embedding
     ])
     |> validate_required([:package, :version, :doc_type])

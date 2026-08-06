@@ -34,6 +34,13 @@ defmodule StdioMcp.Tools.SearchDocs do
 
   Read the `notices` field: it reports version drift, ingestion still running,
   and missing embeddings, and each notice names the argument to change.
+
+  A result carrying `source_url` links the exact file and line the documentation
+  was generated from — version-tagged where the package tags its docs. Docs say
+  what a function is for; the source says what it does. When the question is
+  behaviour rather than usage, follow that link, or `grep deps/<package>` if the
+  package is installed locally. It is absent for guides, and for packages whose
+  docs config sets no source URL.
   """
 
   # Left at the `:forbidden` default deliberately. Declaring
@@ -123,7 +130,8 @@ defmodule StdioMcp.Tools.SearchDocs do
           function: r.function,
           signature: r.signature,
           content: r.content,
-          hexdocs_url: r.hexdocs_url
+          hexdocs_url: r.hexdocs_url,
+          source_url: r.source_url
         }
       end)
 

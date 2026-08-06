@@ -111,9 +111,10 @@ defmodule StdioMcp.Docs.TarballIngestion do
          {:ok, tarball} <- download(package, version),
          {:ok, %{} = files} <- extract(tarball),
          {:ok, items} <- read_index(files),
+         sources = source_index(files),
          docs =
            items
-           |> Enum.flat_map(&build_docs(&1, files, base_url))
+           |> Enum.flat_map(&build_docs(&1, files, base_url, sources))
            |> Enum.map(&Map.put(&1, :package, package)),
 
          # Embedding failure aborts the ingest instead of saving. Persisting rows
@@ -130,6 +131,29 @@ defmodule StdioMcp.Docs.TarballIngestion do
 
       # else
       # {:error, reason} -> Logger.warning("[Embedding]: #{reason}")
+    end
+  end
+
+  @doc """
+  Produces the rows `ingest/3` *would* write, without embedding or saving.
+
+  Same acquisition, index reading, content resolution and chunking as the real
+  path — it stops before `attach_embeddings/1`, which is where the money is. That
+  makes "would a re-ingest change anything?" answerable for free, which matters
+  because the reflex answer to any chunker change is to re-index everything, and
+  re-indexing costs a full re-embed of every package.
+  """
+  @spec dry_run(String.t(), String.t(), String.t() | nil) ::
+          {:ok, [map()]} | {:error, term()}
+  def dry_run(package, version, docs_url \\ nil)
+      when is_binary(package) and is_binary(version) do
+    base_url = docs_base_url(package, version, docs_url)
+
+    with {:ok, tarball} <- download(package, version),
+         {:ok, %{} = files} <- extract(tarball),
+         {:ok, items} <- read_index(files) do
+      sources = source_index(files)
+      {:ok, Enum.flat_map(items, &build_docs(&1, files, base_url, sources))}
     end
   end
 
@@ -275,7 +299,7 @@ defmodule StdioMcp.Docs.TarballIngestion do
 
   # -- Item construction ------------------------------------------------------
 
-  defp build_docs(item, files, base_url) do
+  defp build_docs(item, files, base_url, sources) do
     ref = Map.get(item, "ref", "")
     title = Map.get(item, "title", "")
     type = to_string(Map.get(item, "type", "doc"))
@@ -299,7 +323,8 @@ defmodule StdioMcp.Docs.TarballIngestion do
           signature: signature(title, chunk.path, idx, multi?),
           content: chunk.text,
           code_snippet: first_code_block(chunk.text),
-          hexdocs_url: url
+          hexdocs_url: url,
+          source_url: Map.get(sources, ref)
         }
       end)
     end
@@ -691,6 +716,72 @@ defmodule StdioMcp.Docs.TarballIngestion do
     |> String.trim()
   end
 
+  # -- Source links -----------------------------------------------------------
+
+  # ExDoc writes a "View Source" anchor inside each function's `<section
+  # id="fun/arity">`, pointing at the exact file and line — and, for packages
+  # that tag their docs, at the version: `blob/v1.8.9/lib/phoenix/router.ex#L1428`.
+  # `node_text/2` strips those anchors as chrome, which is correct for their text
+  # and throws away the href, so they are collected here before that happens.
+  #
+  # Built once per tarball and keyed by the same `ref` the items carry
+  # ("Req.html#get/2"), so joining is a map lookup rather than a second parse.
+  #
+  # Coverage is uneven and that is the package's choice, not a defect to paper
+  # over: phoenix and req emit them, boruta emits them pinned to `master` rather
+  # than a tag, anubis_mcp emits none. Stored verbatim — rewriting `master` to a
+  # guessed tag would invent precision the package did not publish.
+  defp source_index(files) do
+    files
+    |> Enum.filter(fn {name, _} -> String.ends_with?(name, ".html") end)
+    |> Enum.reduce(%{}, fn {name, html}, acc ->
+      html
+      |> page_sources()
+      |> Enum.reduce(acc, fn {anchor, url}, inner ->
+        Map.put_new(inner, "#{name}##{anchor}", url)
+      end)
+    end)
+  end
+
+  defp page_sources(html) do
+    html
+    |> LazyHTML.from_document()
+    |> LazyHTML.to_tree()
+    |> collect_sources(nil, %{})
+  rescue
+    _ -> %{}
+  end
+
+  defp collect_sources(nodes, id, acc) when is_list(nodes),
+    do: Enum.reduce(nodes, acc, &collect_sources(&1, id, &2))
+
+  defp collect_sources({"a", attrs, _children}, id, acc) when is_binary(id) do
+    case List.keyfind(attrs, "href", 0) do
+      {_, href} -> if github_source?(href), do: Map.put_new(acc, id, href), else: acc
+      nil -> acc
+    end
+  end
+
+  defp collect_sources({_tag, attrs, children}, id, acc) do
+    collect_sources(children, element_id(attrs) || id, acc)
+  end
+
+  defp collect_sources(_other, _id, acc), do: acc
+
+  defp element_id(attrs) do
+    case List.keyfind(attrs, "id", 0) do
+      {_, value} -> value
+      nil -> nil
+    end
+  end
+
+  # `blob/` or `tree/` distinguishes a source link from the ExDoc footer link to
+  # its own repository, which every page carries.
+  defp github_source?(href) do
+    String.contains?(href, "github.com") and
+      (String.contains?(href, "/blob/") or String.contains?(href, "/tree/"))
+  end
+
   # -- Persistence ------------------------------------------------------------
 
   # The embeddings endpoint takes a whole batch per request, so the batches are
@@ -900,7 +991,8 @@ defmodule StdioMcp.Docs.TarballIngestion do
           :signature,
           :content,
           :code_snippet,
-          :hexdocs_url
+          :hexdocs_url,
+          :source_url
         ])
         |> Map.merge(%{
           package: package,

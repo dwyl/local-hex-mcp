@@ -1,5 +1,7 @@
 # Retrieval eval baseline — 2026-08-06
 
+<https://claude.ai/code/artifact/2647ad93-d8f4-400f-bd12-a6bed3de880e?via=auto_preview>
+
 The control for the chunking and fusion work. Re-run `mix docs.eval` after any
 change and compare against this table; anything that does not move these numbers
 did not work, whatever it looked like in a spot check.
@@ -806,6 +808,228 @@ What still stands, because it is larger than one query:
 
 What does not, and should be re-tested before being trusted: `pure` vs `fused`,
 and the arm-depth choice of 15 over 10.
+
+## Step 8 — phoenix, the HTML path, and `mix docs.drift` (2026-08-06)
+
+`refresh: true` on `phoenix` through the live tool — the first exercise of both
+the large-package path and a tool-triggered refresh. **1212 docs ingested inside a
+single call**, no progress notice, and rank 1 was the `routing.html#forward`
+section, which is exactly the answer.
+
+Integrity of the result:
+
+```
+1212 rows · 0 unembedded · 1191 distinct (98%) · avg 649b · max 1598b (budget 1600)
+
+ExDoc chrome (View Source, Link to this, <span>, &nbsp;)   0
+navigation chunks                                          0
+backslash escapes                                          0
+"end list" comments                                        0
+unbalanced code fences                                    12   <- see below
+```
+
+**The 12 unbalanced fences are in the source.** Phoenix's own `search_data` ships
+exactly 12 items with an odd fence count — the same titles, verified by
+downloading and parsing the tarball independently. `SectionChunker` preserved
+them faithfully. `sourcepos` for a fenced `CodeBlock` includes the closing fence
+(tested), so slicing is correct for well-formed input; malformed input stays
+malformed, which is the right default. Consequence: those 12 rows have
+`code_snippet: nil`. Deliberately not "fixed" — closing them would mean inventing
+text the package never published, forfeiting the byte-identical property the
+`sourcepos` rewrite exists to provide.
+
+One row corpus-wide exceeds the 1600 budget, at 1603: `enforce_ceiling` split at
+≤1600 and `balance_fences` then appended a closing fence. Benign.
+
+### `mix docs.drift`
+
+Question raised: after a chunker change, which packages actually need
+re-ingesting? The reflex is "all of them", and that costs a full re-embed.
+
+`TarballIngestion.dry_run/3` walks the identical path — download, extract, read
+the shipped index, resolve content, chunk — and stops before embedding.
+`mix docs.drift` compares the result to what is stored:
+
+```
+  anubis_mcp        1128 stored   identical
+  boruta             506 stored   identical
+  …
+  phoenix           1191 stored   identical
+
+Every package matches what today's code produces. A refresh is a no-op.
+```
+
+It compares **text only**. A change to `embed_text/1` or to the embedding model
+is invisible to it and still needs `mix docs.reindex`.
+
+This also corrected a claim made earlier in this session. The ingest-side files
+showed mtimes *after* the last reindex, which looked like the corpus might be
+chunked by three different code versions; `git diff HEAD` being empty was
+suggestive but could not see edits made between the reindex and the commit. The
+drift check settles it directly.
+
+## Is this better than an exact search on hexdocs.pm?
+
+A fair challenge: the tool's premise is describing a functionality rather than
+naming it, and if that fails it offers little over a keyword search anyone can
+already run.
+
+Partly true, and worth stating precisely.
+
+**On symbol queries it is near-parity.** `fts` alone scores recall@5 **1.00** and
+MRR 0.88; the full pipeline reaches 1.00 / 1.00. Paste an identifier and the
+keyword arm finds it — hexdocs.pm's own search is the same class of thing. The
+reranker buys ordering, not answers.
+
+**The whole product is the concept half.** On 16 conceptual queries, same corpus:
+
+| arm | recall@5 | MRR |
+| --- | --- | --- |
+| `fts` alone | 0.75 | 0.49 |
+| `vector` alone | 0.81 | 0.67 |
+| full pipeline | **0.94** | 0.64 |
+
++0.19 recall over keyword search — about 2.1 standard errors at n=16, which makes
+it the second-largest effect measured in this document and one of only three
+above the noise floor. Named individually, the queries the keyword arm cannot
+reach:
+
+```
+[boruta]     prevent interception of the authorization code    fts ·   → 4
+[lazy_html]  get the visible text out of a parsed document     fts 6   → 2
+[anubis_mcp] server requests a completion from the client      fts 10  → 2
+```
+
+And the reverse set — queries FTS finds that the pipeline loses — is **empty**.
+
+**The honest limits.** Concept MRR is 0.64: the answer is usually at rank 2 or 3
+rather than 1, so the caller still reads several results. And the tool cannot
+answer what the documentation does not say — boruta never explains *why* PKCE
+exists, so no retrieval strategy will produce that explanation. Several apparent
+retrieval failures in this document were exactly that, misfiled as ranking
+problems.
+
+Every live search run this session — `Building a Server`, `Req.merge/2`, sampling,
+capability checking, nimble_options schemas, phoenix `forward` — returned a usable
+answer at rank 1 or 2. The single live miss was the PKCE question, against a
+package that does not document the concept.
+
+## Step 9 — judgements replace expectations (2026-08-06)
+
+The complaint that produced this: for `avoid database is locked errors under
+concurrent writes`, the harness marked rows 1 and 3 and left row 2 unmarked —
+`Transaction mode`, which says to set `default_transaction_mode: :immediate`.
+That is the actual remedy for lock contention: a `DEFERRED` transaction takes the
+write lock lazily, so a read-then-write must upgrade it, and a failed upgrade is
+`SQLITE_BUSY` that cannot be safely retried. `IMMEDIATE` takes the lock at
+`BEGIN`.
+
+So the unmarked row was a **correct answer the expectation could not see**. Read
+from the scoring side it was being counted as a false positive; read from the
+labelling side it was a false negative. Same disagreement, and the human had the
+better evidence.
+
+**What `✓` actually meant.** "Matches the substring chosen in advance" — not "is
+a good answer". A single-target expectation marks at most one row, while a good
+result set is usually several rows. Every number in this document below the
+tokenizer sweep is therefore a *floor* on answer quality that was reported as
+though it described it. Judged properly, that query returns 4 useful rows of 5;
+the expectation reported "hit at rank 1" and would have reported the same had the
+other four been garbage.
+
+It also explains the four bad expectations (`client_credentials`, `PKCE`, the
+shortened sampling pair, `declare a tool`) as structural rather than accidental:
+encoding "good answer" as a substring match fails this way by construction.
+
+### The replacement
+
+- `StdioMcp.Docs.Judgements` — a human-editable file, `priv/eval/judgements.md`.
+  Keyed on **`{package, hexdocs_url}`**, because row ids die on every re-ingest
+  and content hashes die on every re-chunk, while the URL identifies the section
+  a reader would open. Chunks sharing a URL are collapsed — one document, one
+  judgement.
+- `mix docs.judge` — runs every query through **`Docs.Search.search/2`**, the
+  production path, and writes what it returned for marking. Existing marks are
+  preserved on regeneration.
+- `mix docs.eval --judged` — scores `P@k` (what fraction of the returned page is
+  useful), `any-relevant`, and `coverage`. Unjudged rows are excluded from both
+  numerator and denominator, and `any-relevant` is restricted to queries with at
+  least one mark, so a partly-marked file reports honestly on what it knows
+  rather than reading as failure.
+
+Demonstration on the single query discussed above, 6 of 215 results marked:
+
+```
+judged relevance · rrf+rerank · top 5
+
+all             P@k  0.80   any-relevant  1.00   coverage  0.04
+concept (16)    P@k  0.80   any-relevant  1.00   coverage  0.06
+```
+
+`P@k 0.80` is four useful rows of five — matching the reading exactly, and a
+number the expectations were structurally incapable of producing.
+
+The remaining 209 marks are the actual work, and they are not mine to make: my
+judgement standing in for the user's is the failure this replaces.
+
+## Step 10 — source links, and why not GitHub code search (2026-08-06)
+
+ExDoc already writes a per-function "View Source" anchor pointing at the exact
+file and line, and for packages that tag their docs it is pinned to the version.
+It is in the tarball we download anyway. The HTML walk was **discarding it**:
+`icon-action` elements are stripped as chrome, which is right for the anchor text
+("View Source" is noise) and wrong for the `href`.
+
+Coverage measured across the corpus:
+
+| package | source links | form |
+| --- | --- | --- |
+| phoenix | 267 rows | `blob/v1.8.9/lib/phoenix/router.ex#L1428` — version-tagged |
+| req | 107 | `blob/v0.7.2/...` — version-tagged |
+| boruta | 298 | `blob/master/...` — **not** tagged, can drift from the docs |
+| anubis_mcp | 0 | no `source_url` in its docs config |
+
+Stored verbatim, `master` links included: rewriting those to a guessed tag would
+invent precision the package did not publish — the same rule that leaves
+phoenix's 12 malformed code fences alone.
+
+`mix docs.sources` backfills without embedding. A source link does not affect the
+vector, so `mix docs.reindex` would be the wrong instrument — it re-embeds every
+document to write one metadata field.
+
+### GitHub code search: tested and rejected
+
+The idea was to reach the implementation for packages that ship no source links.
+Measured rather than assumed:
+
+```
+code search,   unauthenticated  ->  HTTP 401     token mandatory, always
+issues search, unauthenticated  ->  HTTP 200
+```
+
+Three reasons it loses:
+
+1. **401 without a token.** `search_github_issues` works today with none; this
+   would make `GITHUB_TOKEN` a hard requirement.
+2. **~10 requests/minute** even authenticated.
+3. **Default branch only** — decisive. It returns `main`, not the tagged version
+   the docs describe, which silently breaks the version-pinning every other part
+   of this server enforces (one version per package, `embedding_config` refusing
+   mismatches, drift notices).
+
+And it only helps the minority case. For those packages the Hex metadata already
+carries the repo — `zoedsoupe/anubis-mcp`, free, in a call `HexPackage.fetch/1`
+already makes — so handing the repo back lets an agent use its own tools, pick
+the right tag, and skip the rate limit.
+
+That leaves a three-tier handoff, strongest first, each free and each degrading
+to the next:
+
+```
+deps/ on disk       -> grep, authoritative, current
+source_url in docs  -> exact file + line + version tag
+github repo link    -> the agent's own tools take over        (still to build)
+```
 
 ### Repeated mistake worth naming
 
