@@ -35,26 +35,61 @@ defmodule StdioMcp.Docs.Search do
                        "`package` (e.g. package: \"phoenix\"), which also triggers " <>
                        "ingestion when it is not indexed yet."
 
+  @search_schema NimbleOptions.new!(
+    package: [
+      type: {:or, [:string, :nil]},
+      default: nil,
+      doc: "Hex package name to search within."
+    ],
+    version: [
+      type: {:or, [:string, :nil]},
+      default: nil,
+      doc: "Optional package version or 'latest'."
+    ],
+    refresh: [
+      type: :boolean,
+      default: false,
+      doc: "Whether to force re-ingesting the package."
+    ],
+    include_examples_only: [
+      type: :boolean,
+      default: false,
+      doc: "Filter results to only entries containing code snippets."
+    ],
+    embedding: [
+      type: {:or, [:string, :nil]},
+      default: nil,
+      doc: "JSON-encoded float vector string or nil."
+    ],
+    limit: [
+      type: :pos_integer,
+      default: 10,
+      doc: "Maximum search results to return."
+    ]
+  )
+
   @spec search(String.t(), keyword()) :: {[PackageDoc.t()], notices()}
   def search(query, opts \\ []) when is_binary(query) do
-    case opts |> Keyword.get(:package) |> presence() do
-      nil -> {[], [@no_package_notice]}
-      package -> search_package(query, package, opts)
+    case NimbleOptions.validate(opts, @search_schema) do
+      {:ok, validated} ->
+        case presence(validated[:package]) do
+          nil -> {[], [@no_package_notice]}
+          package -> search_package(query, package, validated)
+        end
+
+      {:error, %NimbleOptions.ValidationError{} = err} ->
+        {[], ["Invalid search options: #{Exception.message(err)}"]}
     end
   end
 
   @spec search_package(String.t(), String.t(), keyword()) :: {[PackageDoc.t()], notices()}
   defp search_package(query, package, opts) do
     # Normalised once, here, so `version` has a single meaning everywhere below.
-    # Previously `nil` meant "latest" on the ingestion branch and "apply no
-    # filter" on the query branch, which is how a cached search silently
-    # interleaved every stored version of a package.
-    version = opts |> Keyword.get(:version) |> presence() || "latest"
-
-    refresh = Keyword.get(opts, :refresh, false)
-    examples_only = Keyword.get(opts, :include_examples_only, false)
-    embedding = Keyword.get(opts, :embedding)
-    limit = Keyword.get(opts, :limit, 10)
+    version = presence(opts[:version]) || "latest"
+    refresh = opts[:refresh]
+    examples_only = opts[:include_examples_only]
+    embedding = opts[:embedding]
+    limit = opts[:limit]
 
     {notices, resolved_version} = ensure_ingested(package, version, refresh)
 

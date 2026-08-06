@@ -48,5 +48,11 @@ defmodule StdioMcp.Tools.SearchHexPackages do
       {:error, reason} ->
         {:reply, Response.text(Response.tool(), "Hex search failed: #{inspect(reason)}"), frame}
     end
+  rescue
+    e ->
+      require Logger
+      Logger.error("[SearchHexPackages] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
+
+      {:reply, Response.text(Response.tool(), "Search Hex packages failed: #{Exception.message(e)}"), frame}
   end
 end

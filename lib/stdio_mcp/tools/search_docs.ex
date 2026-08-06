@@ -141,6 +141,9 @@ defmodule StdioMcp.Tools.SearchDocs do
     {:reply, Response.text(Response.tool(), Jason.encode!(payload)), frame}
   rescue
     e ->
+      require Logger
+      Logger.error("[SearchDocs] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
+
       {:reply, Response.text(Response.tool(), "Search docs failed: #{Exception.message(e)}"),
        frame}
   end

@@ -56,13 +56,32 @@ defmodule StdioMcp.Memory do
 
   # -- Public API --
 
+  @memory_search_schema NimbleOptions.new!(
+    limit: [
+      type: :pos_integer,
+      default: 5,
+      doc: "Maximum knowledge search results to return."
+    ],
+    kind: [
+      type: {:or, [:string, :nil]},
+      default: nil,
+      doc: "Kind filter."
+    ],
+    package: [
+      type: {:or, [:string, :nil]},
+      default: nil,
+      doc: "Package filter."
+    ]
+  )
+
   def search(query_text, opts \\ []) when is_binary(query_text) do
-    limit = Keyword.get(opts, :limit, 5)
+    validated = NimbleOptions.validate!(opts, @memory_search_schema)
+    limit = validated[:limit]
 
     base_query =
       from(k in Knowledge, where: k.outdated == false)
-      |> scope_kind(opts |> Keyword.get(:kind) |> presence())
-      |> scope_package(opts |> Keyword.get(:package) |> presence())
+      |> scope_kind(presence(validated[:kind]))
+      |> scope_package(presence(validated[:package]))
 
     run_fts_knowledge(base_query, query_text, limit)
   end

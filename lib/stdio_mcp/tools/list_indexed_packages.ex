@@ -63,6 +63,9 @@ defmodule StdioMcp.Tools.ListIndexedPackages do
     {:reply, Response.text(Response.tool(), Jason.encode!(payload)), frame}
   rescue
     e ->
+      require Logger
+      Logger.error("[ListIndexedPackages] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
+
       {:reply, Response.text(Response.tool(), "Listing failed: #{Exception.message(e)}"), frame}
   end
 

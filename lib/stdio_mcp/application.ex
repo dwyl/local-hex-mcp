@@ -6,6 +6,7 @@ defmodule StdioMcp.Application do
   def start(_type, _args) do
     # Redirect Erlang logger to stderr so stdout stays completely clean for JSON-RPC
     :logger.update_handler_config(:default, :config, %{type: :standard_error})
+    :io.setopts(:standard_io, encoding: :utf8)
 
     setup_file_logging()
 

@@ -37,6 +37,12 @@ defmodule StdioMcp.Tools.Remember do
   def execute(%{texts: texts}, frame) do
     reply = if Client.memory_enabled?(), do: submit_all(texts), else: disabled_reply()
     {:reply, Response.text(Response.tool(), Jason.encode!(reply)), frame}
+  rescue
+    e ->
+      require Logger
+      Logger.error("[Remember] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
+
+      {:reply, Response.text(Response.tool(), "Remember failed: #{Exception.message(e)}"), frame}
   end
 
   # Every decision record is opened *before* anything is spawned, so the caller
