@@ -27,20 +27,35 @@ defmodule StdioMcp.Docs.Fusion do
   it.
   """
 
-  # 60 is the constant from the original RRF paper and there is no reason to tune
-  # it here: with a reranker downstream this ordering is discarded, so the only
-  # property that matters is which ids survive, and `k` barely moves that.
-  @k 60
+  # 60 is the constant from the original RRF paper, where the job is fusing large
+  # candidate sets produced by independent systems. For *that* fusion — the two
+  # retrieval arms — it is the right default and barely matters, since the
+  # ordering it produces is rescored downstream and only membership survives.
+  #
+  # It is not the right default everywhere. `Docs.Reranker` fuses two permutations
+  # of the *same* ten items, and there `k` stops being a smoothing constant and
+  # becomes the dial controlling how much authority the cross-encoder has:
+  #
+  #     k      best/worst score ratio over 10 items
+  #     0      10.00x   reranker ordering dominates
+  #     10      1.82x
+  #     60      1.15x   near pure rank-averaging
+  #
+  # At 60 every score sits within 15% of every other, so the fusion barely nudges.
+  # That is why `rrf/3` exists: the caller that needs a different balance says so.
+  @default_k 60
 
   @doc """
-  Fuses ranked id lists into a single ranked list, longest-first, capped at
-  `limit`.
+  Fuses ranked id lists into a single ranked list, best-first, capped at `limit`.
+
+  `k` damps the influence of rank differences — larger flattens, smaller
+  sharpens. Ranks are 1-based, so `k: 0` is well defined.
   """
-  @spec rrf([[term()]], pos_integer()) :: [term()]
-  def rrf(ranked_lists, limit) do
+  @spec rrf([[term()]], pos_integer(), non_neg_integer()) :: [term()]
+  def rrf(ranked_lists, limit, k \\ @default_k) do
     ranked_lists
     |> Enum.flat_map(fn ids ->
-      ids |> Enum.with_index(1) |> Enum.map(fn {id, rank} -> {id, 1 / (@k + rank)} end)
+      ids |> Enum.with_index(1) |> Enum.map(fn {id, rank} -> {id, 1 / (k + rank)} end)
     end)
     |> Enum.reduce(%{}, fn {id, score}, acc -> Map.update(acc, id, score, &(&1 + score)) end)
     |> Enum.sort_by(fn {_id, score} -> -score end)

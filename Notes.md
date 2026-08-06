@@ -507,6 +507,306 @@ rrf+rerank          1.00      1.00      1.00       390
 `hybrid` is retained in the table only as the control — it is what the server ran
 before this step (0.88/0.75) and is no longer reachable in production.
 
+### Live MCP verification (2026-08-06)
+
+Everything above was measured in the dev BEAM. Run against the real server —
+`MIX_ENV=prod mix mcp.server --no-compile`, through the Anubis stdio transport:
+
+- `list_indexed_packages` reports the new block:
+  `embedding: {index_model: "mistral-embed", dims: 1024, query_model:
+  "mistral-embed", matches_config?: true}`.
+- `"Building a Server"` / anubis_mcp — the guide at rank 1, five of the top seven
+  from `building-a-server.html`, no navigation chunks.
+- `Req.merge/2` / req — exact hit at rank 1, its examples at 4.
+- boruta returns the pre-release notice correctly.
+- **Auto-ingest end to end**: `nimble_options` was not indexed; one
+  `search_docs` call downloaded, chunked, embedded and answered inside the
+  request — 53 docs, no timeout notice, rank 1 the right section. Invariants
+  held: 1024 dims, 0 unembedded, 0 navigation chunks, 0 backslash escapes,
+  `embedding_config` unchanged.
+
+**The live call disagreed with the eval, and the eval was wrong.** The PKCE query
+scored a perfect rank-1 hit while the server returned `Boruta.Oauth.Client.t/0` —
+a typespec listing `pkce: boolean()` among thirty fields — and put the actual
+guide at rank 8. `{:content, "PKCE"}` matched 7 rows across 6 modules including a
+changelog entry. Tightened to `{:module, "pkce"}`, which is the guide's own page.
+
+That single change exposed a genuine reranker failure the loose expectation had
+been hiding:
+
+```
+[boruta] prevent interception…   fts 5   vector 1   hybrid 1   rrf 1   rerank 8
+```
+
+Retrieval puts the guide at rank 1 on three arms. **The cross-encoder demotes it
+to 8**, preferring the typespec — which shares "authorization code", "public
+client" and "pkce" as literal tokens while explaining none of them. This is the
+same weakness as the earlier concept regression, surviving at seq 512.
+
+### Control after tightening — 26 queries
+
+```
+all           recall@5   MRR@10      cand        ms
+fts                 0.92      0.67      0.96         3
+vector              0.88      0.76      1.00        40
+hybrid              0.92      0.79      0.96        31
+rrf                 0.92      0.76      1.00        28
+rrf+rerank          0.96      0.78      1.00       397
+
+concept (14)  recall@5   MRR@10      cand        ms
+vector              0.86      0.69      1.00        53
+hybrid              0.86      0.73      0.93        33
+rrf                 0.86      0.64      1.00        28
+rrf+rerank          0.93      0.59      1.00       405
+
+symbol (12)   recall@5   MRR@10      cand        ms
+rrf+rerank          1.00      1.00      1.00       391
+```
+
+Honest reading, now that the metric is not being flattered:
+
+- The reranker **raises concept recall** (0.86 -> 0.93) and **lowers concept MRR**
+  (rrf 0.64, hybrid 0.73, reranked 0.59). It pulls answers into the top 5 that
+  retrieval missed, and pushes rank-1 answers down. Both effects are real.
+- On symbols it remains perfect and unambiguous.
+- recall@5 is no longer saturated (0.96), so the set can measure again.
+
+`search_docs` now returns `limit: 5` rather than 10. The rerank pool is 10, so
+returning all of it handed back exactly the tail the cross-encoder had just
+demoted — measured live, the last two or three rows of every search were
+changelog entries and unrelated functions.
+
+## Step 5 — bounding the reranker's authority (2026-08-06)
+
+The PKCE query survived every fix so far: three retrieval arms put the guide at
+rank 1, the cross-encoder dropped it to 8, and with `limit: 5` it stopped being
+returned at all.
+
+**Hypothesis tested and rejected: chunk labelling.** `Reranker.text/1` prepends a
+header, and `signature` — the field carrying the heading trail — was not in it.
+Scored four header variants against the same candidate pool:
+
+| header | pkce guide rank |
+| --- | --- |
+| `module.function` (current) | 8 |
+| `signature` only | 8 |
+| `module` + `signature` | 8 |
+| no header at all | 10 |
+
+Labelling moves nothing. It did surface a real defect — `function` is already
+module-qualified on modern ExDoc, so the header read
+`Boruta.Oauth.Client.Boruta.Oauth.Client.public?/1`, the module name twice. Fixed;
+it wastes tokens at the compiled sequence length but was not the cause.
+
+**The actual cause.** Every score in that pool is negative (best −2.58): the model
+is saying nothing here answers the question, and it is *right*. boruta's PKCE
+guide is a how-to —
+
+```
+45742   26b  "# Notes for pkce extension"
+45743  575b  "…create a client with pkce value as true"
+45744  503b  "…sending the code_challenge and code_challenge_method…"
+```
+
+— that never explains why PKCE exists, never says "interception", never says
+"public client". No chunk answers the question in those words.
+
+But the **bi-encoder bridged the gap anyway** and put the guide at rank 1, while
+the cross-encoder, judging the pair on its literal text, preferred
+`Boruta.Oauth.Client.t/0` — a typespec listing `pkce: boolean()` among thirty
+fields. So this is not a labelling problem or a model-quality problem. It is a
+question of how much authority the last stage gets.
+
+### Strategy comparison (same corpus, 26 queries)
+
+| strategy | all r@5 | all MRR | concept r@5 | pkce rank |
+| --- | --- | --- | --- | --- |
+| `pure` — cross-encoder ordering wins | 0.92 | 0.78 | 0.86 | 8 |
+| `gated` — keep retrieval order if best score < 0 | 0.92 | 0.77 | 0.86 | 8 |
+| **`fused`** — RRF of retrieval order with reranked order | **0.96** | **0.78** | **0.93** | **3** |
+
+`fused` is now the default (`AI_RERANK_STRATEGY` to override). No latency cost —
+a second fusion over ten ids.
+
+**But see the audit below: this table does not support the choice.** The whole
+aggregate difference is the one query the strategy was selected on.
+
+`gated` was the more elegant idea and does nothing: the all-negative condition
+either does not fire or the retrieval order is not better when it does.
+
+## The eval is not comparable across ingests
+
+Found by accident, and it invalidates any before/after that spans an ingestion.
+The live `nimble_options` test added 53 rows, and with nothing else changed:
+
+```
+                before ingest    after ingest
+fts             0.92  0.67   →   0.88  0.67     ← moved
+vector          0.88  0.76   →   0.88  0.76       identical
+hybrid          0.92  0.79   →   0.92  0.79       identical
+```
+
+**BM25 is collection-global.** FTS5's `bm25()` uses corpus-wide document
+frequency and average document length, so indexing any package shifts the keyword
+ranking of queries in *other* packages. Vector search is immune — cosine is
+per-row.
+
+Three consecutive runs of an identical configuration give identical numbers, so
+this is not noise; it is a real dependency on corpus composition. The report now
+prints a corpus fingerprint (`corpus 10 packages / 2755 rows`) so a comparison
+against a table built on a different corpus is visible rather than silently
+wrong. The step-by-step comparisons above all held the corpus fixed and stand.
+
+### Control — 26 queries, corpus 10 packages / 2755 rows
+
+```
+all           recall@5   MRR@10      cand        ms
+fts                 0.88      0.67      0.96         3
+vector              0.88      0.76      1.00        32
+hybrid              0.92      0.79      0.96        31
+rrf                 0.92      0.76      1.00        28
+rrf+rerank          0.96      0.79      1.00       398
+
+concept (14)  recall@5   MRR@10      cand        ms
+rrf+rerank          0.93      0.60      1.00       413
+
+symbol (12)   recall@5   MRR@10      cand        ms
+rrf+rerank          1.00      1.00      1.00       390
+```
+
+Concept MRR (0.60) remains the weakest number and the reranker is still what
+holds it down — it raises concept recall (0.86 -> 0.93) while ranking worse than
+plain retrieval (hybrid 0.73). Bounding its authority recovered the recall; the
+ordering gap is the next thing worth attacking.
+
+## Step 6 — the RRF `k` sweep, a null result (2026-08-06)
+
+Reasoning that motivated it: the second fusion combines two permutations of the
+*same* ten items, so `k` stops being a smoothing constant and becomes the dial
+controlling how much authority the cross-encoder has. The score spread confirms
+that much —
+
+| k | best/worst score ratio over 10 items |
+| --- | --- |
+| 0 | 10.00x |
+| 10 | 1.82x |
+| 60 | 1.15x |
+
+At 60 every score sits within 15% of every other, which looks like an
+accidentally extreme setting: 60 comes from the RRF paper, where the task is
+fusing large candidate sets from independent systems.
+
+**It moves nothing.**
+
+| k | all r@5 / MRR | concept r@5 / MRR | symbol |
+| --- | --- | --- | --- |
+| 0 | 0.96 / 0.78 | 0.93 / 0.60 | 1.00 / 1.00 |
+| 5 | 0.96 / 0.79 | 0.93 / 0.60 | 1.00 / 1.00 |
+| 10 | 0.96 / 0.79 | 0.93 / 0.60 | 1.00 / 1.00 |
+| 20 | 0.96 / 0.79 | 0.93 / 0.60 | 1.00 / 1.00 |
+| 60 | 0.96 / 0.79 | 0.93 / 0.60 | 1.00 / 1.00 |
+
+Per-query, five of 26 shift by exactly one rank between k=0 and k=60 — three
+improve, two worsen. Noise, not a gradient.
+
+The explanation, which is only obvious afterwards: over ten items, ordering by
+`Σ 1/(k+rᵢ)` approximates ordering by **rank-sum** at large k and weights the
+head at k=0, and those two orderings disagree only when an item is extreme on one
+list and middling on the other. Rare enough here to vanish into noise.
+
+**What mattered was the binary, not the weighting.** Whether retrieval's order
+gets a vote at all took recall@5 from 0.92 (`pure`) to 0.96 (`fused`). How
+heavily it votes is irrelevant. The knob was removed and the null result recorded
+in `Reranker.fusion_k/0` so nobody re-runs the experiment.
+
+### Where this leaves concept MRR
+
+0.60, and still the weakest number. Worth stating plainly what is now known about
+it:
+
+- Plain retrieval orders concept queries **better** than the reranked pipeline
+  (hybrid 0.73, rrf 0.64, reranked 0.60) while finding fewer of them
+  (recall 0.86 against 0.93).
+- So the cross-encoder is trading ordering for recall on exactly the query class
+  it was added to help, and bounding its authority recovered the recall without
+  recovering the ordering.
+- That is not surprising given the model: an MS MARCO cross-encoder is out of
+  domain on Elixir documentation, while the embedding model is code-tuned.
+  Capacity does not fix it — the two larger rerankers that load both scored worse.
+
+The honest next step is **not** another knob. Fourteen concept queries cannot
+distinguish 0.60 from 0.73 with any confidence — the whole gap is roughly seven
+one-rank movements. The set needs to be perhaps three times larger, with
+expectations tightened the way the PKCE one was, before any further tuning here
+means anything.
+
+## Step 7 — auditing the `fused` decision (2026-08-06)
+
+Prompted by a fair objection: fusing a permutation of a set with the set itself
+looks like it should not do much, so the reported gain deserves scrutiny.
+
+**What the second fusion actually is.** Both inputs hold the same ten documents,
+so each contributes `1/(60 + rank)` exactly twice, and with k=60 that term is
+nearly linear in rank. The result therefore orders by something very close to
+`retrieval_rank + reranker_rank`. It is **rank averaging** — Borda count — and
+nothing more. Calling it "bounded rerank" made it sound like a mechanism when it
+is an ensemble.
+
+**Per-query audit, pure vs fused, same corpus:**
+
+```
+improved                          pure → fused
+  [req] retry                        4 → 3
+  [req] HTTP stub                    2 → 1
+  [anubis] declare a tool            4 → 3
+  [lazy_html] visible text           4 → 3
+  [boruta] PKCE                      8 → 2   <- +6
+
+worsened
+  [req] redirects                    1 → 2
+  [exqlite] WAL                      3 → 4
+  [anubis] error result              5 → 6
+  [gen_magic] file type              1 → 2
+
+9 of 26 differ · 5 up, 4 down · every movement ±1 except PKCE
+```
+
+**Remove PKCE and the effect is exactly zero** — four up by one, four down by
+one. The entire aggregate difference is the single query the strategy was chosen
+on after watching it fail, which is post-hoc fitting. And the size of that
+difference (recall@5 0.92 -> 0.96, one query) is 0.04, against a standard error
+at n=26 of `sqrt(0.95 * 0.05 / 26)` = **0.043**. Exactly one standard error.
+Indistinguishable from nothing.
+
+`fused` is kept, but on the **mechanistic** argument and not the measurement: a
+bi-encoder and a cross-encoder fail differently, so averaging their ranks is the
+standard response to two rankers with uncorrelated errors, and the PKCE case
+demonstrates that mechanism rather than merely being a lucky draw. Recorded as
+unvalidated.
+
+The shape of the audit is itself evidence against the ensemble argument, though:
+eight queries moving by exactly one rank and one moving by six reads as "the two
+rankers agree except in one case", which is the regime where averaging buys
+nothing. Genuinely uncorrelated errors would show larger, asymmetric movement.
+
+### The pattern behind three of these
+
+`client_credentials`, `PKCE` and now `fused` — three times a conclusion rested on
+one query, and all three were caught by reading output rather than by reading the
+metric. At n=26 a single query is 0.04, which is the size of every "improvement"
+claimed in this document below the tokenizer sweep.
+
+What still stands, because it is larger than one query:
+
+- the tokenizer/sanitiser work (0.80 -> 0.88 on `fts`, four queries)
+- `sequence_length` 128 -> 512 (0.79 -> 0.93 concept recall, two queries, and
+  monotone across four values rather than a single jump)
+- the `k` sweep as a **null** result (nulls are robust at any n; they only need
+  the absence of an effect)
+
+What does not, and should be re-tested before being trusted: `pure` vs `fused`,
+and the arm-depth choice of 15 over 10.
+
 ### Repeated mistake worth naming
 
 `Reranker.rerank/2` was first written query-first and piped as

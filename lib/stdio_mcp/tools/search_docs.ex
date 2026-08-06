@@ -101,7 +101,13 @@ defmodule StdioMcp.Tools.SearchDocs do
       refresh: refresh,
       include_examples_only: examples_only,
       embedding: vector,
-      limit: 10
+      # 5, not 10. The pipeline reranks a pool of 10 and `recall@5` is what the
+      # eval optimises, so returning all 10 hands back the tail the cross-encoder
+      # has just finished demoting — measured live, the last two or three rows of
+      # every search were changelog entries and unrelated functions. Returning
+      # the reranked head costs nothing measurable and drops roughly a third of
+      # the payload.
+      limit: 5
     ]
 
     {results, notices} = Search.search(query, opts)

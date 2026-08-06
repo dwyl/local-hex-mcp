@@ -178,11 +178,22 @@ defmodule Mix.Tasks.Docs.Eval do
       query: "restrict access to an HTTP endpoint using a bearer token",
       expect: {:content, "bearer"}
     },
+    # Tightened 2026-08-06 after a live MCP call disagreed with the eval. The
+    # expectation was `{:content, "PKCE"}`, which matched 7 rows across 6
+    # modules — including `Boruta.Oauth.Client.t/0`, a typespec dump listing
+    # `pkce: boolean()` among thirty other fields, and a changelog entry. The
+    # server returns that typespec at rank 1, so the eval scored a perfect hit
+    # while the document that actually answers the question (`pkce.html`, the
+    # guide) sat at rank 8.
+    #
+    # An expectation that a typespec can satisfy does not measure whether the
+    # answer was found. Scoped to the guide's own page, which is the only thing
+    # here that explains the flow.
     %{
       kind: :concept,
       package: "boruta",
       query: "prevent interception of the authorization code on a public client",
-      expect: {:content, "PKCE"}
+      expect: {:module, "pkce"}
     },
     %{
       kind: :concept,
@@ -201,6 +212,28 @@ defmodule Mix.Tasks.Docs.Eval do
       package: "gen_magic",
       query: "identify the type of an uploaded file from its contents",
       expect: {:content, "mime"}
+    },
+    # Added 2026-08-06. Unlike every other query here, these two were not written
+    # by reading the corpus for something to point at — they are real questions
+    # asked during a working session, whose answers were then verified by running
+    # the code. That provenance matters: two of the three expectations that had to
+    # be fixed in this file were reverse-engineered from the index and turned out
+    # to measure corpus coverage rather than retrieval.
+    %{
+      kind: :concept,
+      package: "anubis_mcp",
+      query: "server requests a completion from the client model, sampling create message",
+      expect: {:function, "Anubis.Server.send_sampling_request/2"}
+    },
+    # The answer shares no identifier and no phrasing with the question — the rule
+    # lives in the docstring of the *elicitation* function and covers all three
+    # server-initiated request kinds. Nothing the keyword arm can reach.
+    %{
+      kind: :concept,
+      package: "anubis_mcp",
+      query:
+        "check whether the connected client declared a capability before sending a server request",
+      expect: {:function, "Anubis.Server.send_elicitation_request/3"}
     },
     # Added after step 2. This is the query that started the investigation and it
     # was not in the set, so the set could not measure the thing step 2 fixed:
@@ -638,6 +671,7 @@ defmodule Mix.Tasks.Docs.Eval do
     Mix.shell().info("""
 
     #{length(evaluations)} queries · top-#{config.limit} · #{config.candidates} per arm · rerank top #{config.rerank_depth}
+    corpus #{corpus_fingerprint()}
     """)
 
     section("all", evaluations, modes, config)
@@ -649,6 +683,25 @@ defmodule Mix.Tasks.Docs.Eval do
     end
 
     if config.verbose?, do: detail(evaluations, modes, config)
+  end
+
+  # BM25 is collection-global: FTS5's `bm25()` uses corpus-wide document
+  # frequency and average document length, so ingesting *any* package changes the
+  # keyword ranking of queries in *other* packages. Measured — indexing 53 rows
+  # of `nimble_options` moved the `fts` arm from 0.92 to 0.88 with nothing else
+  # touched, and the reranked row followed it.
+  #
+  # A control table is therefore only valid for the corpus that produced it. This
+  # line makes a mismatched comparison visible instead of silently wrong.
+  defp corpus_fingerprint do
+    %{packages: packages, rows: rows} =
+      Repo.one(
+        from(d in PackageDoc,
+          select: %{packages: count(d.package, :distinct), rows: count(d.id)}
+        )
+      )
+
+    "#{packages} packages / #{rows} rows"
   end
 
   defp section(label, evaluations, modes, config) do

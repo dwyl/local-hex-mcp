@@ -202,126 +202,293 @@ Replicate your SQLite database to cloud storage (S3, B2, etc.) for backup and po
 
 ## Search engine
 
+A query runs three stages: two retrieval arms in parallel, reciprocal rank
+fusion, then a cross-encoder whose verdict is fused *back* against the retrieval
+order rather than replacing it. Roughly 400ms end to end.
+
 ```mermaid
-flowchart TD
-    %% Custom Styling
-    classDef storage fill:#1e293b,stroke:#475569,stroke-width:1px,color:#f8fafc
-    classDef process fill:#0f172a,stroke:#3b82f6,stroke-width:1.5px,color:#f8fafc
-    classDef model fill:#312e81,stroke:#6366f1,stroke-width:1.5px,color:#f8fafc
-    classDef fusion fill:#064e3b,stroke:#10b981,stroke-width:1.5px,color:#f8fafc
-    classDef rerank fill:#701a75,stroke:#d946ef,stroke-width:1.5px,color:#f8fafc
-    classDef external fill:#451a03,stroke:#f97316,stroke-width:1.5px,color:#f8fafc
+flowchart LR
+    Q([search_docs<br/>query + package])
 
-    subgraph INGESTION ["1. Ingestion & Section Chunking Pipeline"]
-        direction TB
-        A[Hex.pm Package Tarball] --> B[Extract Markdown Docs]
-        B --> C["MDEx.parse_document!/1"]
-        C --> D[SectionChunker State Machine]
-        
-        subgraph CHUNK_BUILD ["Section Grouping & Enrichment"]
-            D --> E["Group AST Nodes by Headings\n(H1: Module, H2: Function)"]
-            E --> F["Inject Structural Breadcrumbs\n(Package > Module > Section)"]
-            F --> G["Generates Dual Output:\n• Raw Markdown (content)\n• Enriched Context Payload"]
-        end
+    Q -->|QuerySanitizer| FTS["FTS5 · BM25<br/>top 15 · 3ms"]
+    Q -->|embed, 1024-dim| VEC["sqlite-vec · cosine<br/>top 15 · 32ms"]
 
-        G --> H["Mistral / Codestral API\n(Batched 1024-dim Embeddings)"]:::model
-        
-        G -->|Save Hydrated Docs| DB_DOCS[(SQLite: docs Table)]:::storage
-        H -->|Store Vector Blobs| DB_VEC[(SQLite: docs_vec Table)]:::storage
-        G -->|Auto-Triggers Sync| DB_FTS[(SQLite: docs_fts Trigram Table)]:::storage
-    end
+    FTS --> RRF1{{"RRF k=60<br/>pool of 10"}}
+    VEC --> RRF1
 
-    subgraph QUERY_PIPE ["2. Parallel Hybrid Query Stage"]
-        direction TB
-        Q([User Search Query]) --> S1[QuerySanitizer]
-        Q --> S2["Embedding API\n(Mistral/Codestral)"]:::model
+    RRF1 -->|10 pairs| CE["cross-encoder<br/>512 tokens · 390ms"]
+    CE -->|scored order| RRF2{{"RRF<br/>bounded rerank"}}
+    RRF1 -->|retrieval order| RRF2
 
-        S1 -->|Preserves Symbols<br/>e.g. map /2 -> map/2| Q_FTS["Sanitized String"]
-        S2 -->|Generates 1024-dim Float List| Q_VEC["Query Vector"]
+    RRF2 --> OUT([top 5 + notices])
 
-        subgraph SQLITE_EXEC ["Single-Pass SQLite CTE Execution (< 5ms)"]
-            direction LR
-            Q_FTS -->|MATCH Trigram Index| DB_FTS
-            Q_VEC -->|Exact SIMD Cosine Scan| DB_VEC
-
-            DB_FTS -->|Rank BM25| FTS_TOP["Top 40 Lexical Candidates"]
-            DB_VEC -->|Rank Distance| VEC_TOP["Top 20 Vector Candidates"]
-        end
-    end
-
-    subgraph FUSION ["3. Candidate Fusion Stage"]
-        direction TB
-        FTS_TOP --> RRF_JOIN
-        VEC_TOP --> RRF_JOIN
-
-        subgraph RRF_JOIN ["SQLite CTE: FULL OUTER JOIN & RRF Scoring"]
-            direction TB
-            M1["1 / (60 + Lexical_Rank)"]
-            M2["1 / (60 + Vector_Rank)"]
-            M1 & M2 --> SUM["RRF Score = RRF_Lexical + RRF_Vector"]
-        end
-
-        RRF_JOIN --> TOP20["Fetch Top 20 Hydrated Chunks"]:::fusion
-    end
-
-    subgraph LIVE_ISSUES ["Alternative MCP Branch: Live Bug Diagnostics"]
-        direction TB
-        BUG_Q([User Bug / Stack Trace Query]) --> REQ_GH["Req.get/2 -> GitHub REST API"]:::external
-        REQ_GH -->|Fetch Top 10 Issue JSONs| RAW_ISSUES["Format Issue Payloads"]
-    end
-
-    subgraph RERANK ["4. Deep Cross-Encoder Reranking"]
-        direction TB
-        TOP20 --> PAIRS["Format Tuple Pairs:<br/>{User Query, Context-Enriched Text Payload}"]
-        RAW_ISSUES -.-> PAIRS
-
-        PAIRS --> EXLA["Nx.Serving / EXLA Engine\n(cross-encoder/ms-marco-MiniLM-L-6-v2)"]:::model
-        
-        EXLA -->|Joint-Attention Rescoring (~50ms)| SCORED["Logit Relevance Scores"]:::rerank
-        SCORED --> SORT["Sort Candidates by Cross-Encoder Score"]
-        SORT --> FINAL(["Return Top 3 to 5 Pristine MCP Results"]):::rerank
-    end
-
-    %% Class Assigns
-    class A,B,C,D,E,F,G,S1,PAIRS,SORT,RAW_ISSUES process
-    class DB_DOCS,DB_VEC,DB_FTS storage
+    classDef lex stroke:#b3600f,stroke-width:2px
+    classDef vecc stroke:#2b6d85,stroke-width:2px
+    class FTS lex
+    class VEC vecc
 ```
 
-## Important example on how to use `search-docs`
+**Fusion happens twice.** The first pass unions the two arms — a *union*, not an
+intersection, so a document the keyword arm never matched can still be returned.
+The second pass fuses the cross-encoder's ordering with the one retrieval
+produced, so the model can move a document but not overrule the search outright.
 
-In the Code assistant terminal (the hex_local MCP is connected), ask a normal question — you do not call the tool yourself:
+Concretely, the second fusion is **rank averaging**: both inputs hold the same
+ten documents, so each contributes `1/(60 + rank)` twice and the result orders by
+something very close to the sum of the two ranks. Nothing cleverer than that.
+
+The case it was built for: on `"prevent interception of the authorization code on
+a public client"`, all three retrieval arms put boruta's PKCE guide at rank 1 and
+the cross-encoder dropped it to 8, preferring a typespec that lists
+`pkce: boolean()` among thirty fields. Averaging the two rankings puts it back
+at 2.
+
+**How well this generalises is not established.** Against the 26-query set,
+fusing rather than letting the cross-encoder win outright moves 9 queries: five
+improve, four worsen, and every movement is one rank except the PKCE case that
+motivated the change. Remove that query and the effect is exactly zero. The
+aggregate difference (recall@5 0.92 → 0.96) is one query, and one standard error
+at this sample size is 0.043 — so the number is indistinguishable from noise.
+
+It is kept on the mechanistic argument rather than the measurement: a bi-encoder
+and a cross-encoder fail differently, so averaging their ranks is the standard
+response to two rankers with uncorrelated errors. Treat it as unvalidated until
+the query set is large enough to test it.
+
+### Query, step by step
+
+1. **Embed the query** — one API call, 1024 dimensions. The only network hop in a
+   warm query.
+2. **Ensure the package is indexed** — an unknown package triggers ingestion
+   inline (below); a known one costs one row lookup and no network.
+3. **Verify the embedding model** — if the index was built by a different model,
+   the vector is dropped and a notice says so. Vectors from two models are not
+   comparable: different widths make sqlite-vec raise, identical widths return
+   noise while raising nothing.
+4. **Scope** — package, version and the examples-only filter are applied to a
+   base query that *both* arms join, so the depth budget is never spent on other
+   packages.
+5. **Keyword arm** — `QuerySanitizer` quotes each term as an FTS5 phrase and
+   expands identifier-shaped terms into joined *and* split forms, so
+   `Boruta.Oauth.token/2` searches for the exact symbol and its parts. BM25 order,
+   top 15.
+6. **Vector arm** — cosine distance over the scoped rows, top 15. This is the arm
+   that bridges vocabulary gaps.
+7. **Fuse to ten** — each arm contributes `1/(60 + rank)`; an absent document
+   contributes nothing.
+8. **Hydrate in fused order** — `id IN (…)` returns storage order, so the ranking
+   is reimposed before the reranker sees it.
+9. **Rerank** — the cross-encoder reads each query/document pair together and
+   emits one relevance logit; the result is fused with step 7's order.
+10. **Return five.** The pool is ten; returning all of it hands back exactly the
+    tail the reranker just demoted.
+
+### Ingestion
+
+Runs inline on the first search naming a package. One HTTP request for the docs,
+nothing written to disk.
+
+```mermaid
+flowchart LR
+    S([unindexed package]) --> HEX["hex.pm API<br/>resolve version"]
+    HEX --> GUARD{same embedding<br/>model?}
+    GUARD -->|no| REFUSE([refuse before download])
+    GUARD -->|yes| TAR["docs tarball<br/>1 request, in memory"]
+    TAR --> IDX["search_data<br/>or sidebar_items"]
+    IDX --> CONTENT["item doc → markdown section<br/>→ HTML tree walk"]
+    CONTENT --> CHUNK["SectionChunker<br/>MDEx AST, sliced by sourcepos"]
+    CHUNK --> EMB["embeddings<br/>200 per batch, 2 concurrent"]
+    EMB -->|any failure| ABORT([abort, nothing written])
+    EMB --> REC["record model + dims<br/>from the response"]
+    REC --> SAVE[("package_docs<br/>FTS triggers sync")]
+```
+
+Notable decisions:
+
+- **A stored version that differs from the current release is reported, never
+  silently replaced.** Auto-switching would let one unpinned search discard a
+  pinned version and force a full re-embed to get it back.
+- **The model guard runs before the download.** A mixed-model index cannot be
+  repaired by searching harder, and refusing costs one row read where proceeding
+  costs a tarball plus a full re-embed.
+- **Chunking is structural, not byte-based.** Boundaries fall on headings, then
+  blocks, then list items, with a byte splitter kept only as the floor for a
+  single oversized code block. Navigation sections — link lists made of the very
+  titles people search for — are dropped. Nothing overlaps: text is sliced from
+  the original markdown by source position, so what is stored is byte-identical
+  to what the package published.
+- **Embedding failure aborts before a single row is written.** Rows without
+  vectors produce an index that looks complete, passes every count check, and is
+  invisible to semantic search.
+
+### Why the depths are what they are
+
+Every number was measured against a fixed 26-query set (`mix docs.eval`). Three
+are counterintuitive.
+
+| Setting | Value | Why not more |
+| --- | --- | --- |
+| per-arm depth | 15 | Deeper is **worse**. RRF scores agreement, so at depth 40 an item ranked ~15 by both arms (`1/75 + 1/75`) outscores one ranked 3rd by a single arm (`1/63`), and the strong single-arm hit falls out of the pool. recall@5 drops 1.00 → 0.96 purely by retrieving more. |
+| rerank pool | 10 | Retrieval wants depth; reranking does not. Candidate recall is already 1.00 at ten, so everything beyond is a distractor the model can mis-promote and nothing it can find. |
+| sequence length | 512 | At 128 the pair truncates to ~400 characters. Symbol queries survive — the identifier is in the header — while conceptual answers sit deeper in the chunk and are never seen. Reranking at 128 scored *worse than not reranking at all*. |
+
+Two properties worth knowing before trusting a measurement:
+
+- **BM25 is corpus-global.** FTS5 uses collection-wide document frequency, so
+  indexing any package shifts the keyword ranking of queries in *other* packages
+  — measured, 53 new rows moved the keyword arm by 0.04 with nothing else
+  touched. Vector search is immune. A control table is only valid for the corpus
+  that produced it, which is why the report prints a corpus fingerprint.
+- **Bigger rerankers are not better here.** `bge-reranker-base` (278M) scores
+  0.78 MRR against MiniLM-L-6's 0.79 and is five times slower;
+  `ms-marco-MiniLM-L-12-v2` loses two queries outright. Selectable via
+  `AI_RERANK_MODEL`.
+
+### When a stage fails
+
+Every stage degrades to the one beneath it. None is an error the caller handles.
+
+| Condition | Behaviour |
+| --- | --- |
+| No API key, or the index was built by another model | Keyword search alone, with a notice naming the fix |
+| Cross-encoder not loaded, or its output unrecognised | Fused retrieval order, logged |
+| Keyword terms match nothing | The vector arm carries the fusion alone |
+| Both arms empty | No results — not an exception |
+| Ingestion outruns the request budget | A progress notice; the job keeps running and the next identical search collects it |
+
+### Measured
+
+26 queries — 14 conceptual, 12 bare identifiers — over 10 packages and 2,755
+chunks. `cand` is the share of queries whose candidate pool contained the answer
+at all, and is the ceiling on everything downstream.
+
+| Strategy | recall@5 | MRR@10 | cand | ms |
+| --- | --- | --- | --- | --- |
+| keyword only | 0.88 | 0.67 | 0.96 | 3 |
+| vector only | 0.88 | 0.76 | 1.00 | 32 |
+| intersection (previous design) | 0.92 | 0.79 | 0.96 | 31 |
+| fusion | 0.92 | 0.76 | 1.00 | 28 |
+| **fusion + bounded rerank** | **0.96** | **0.79** | **1.00** | **398** |
+
+Split by query shape the last row reads very differently: `1.00 / 1.00` on bare
+identifiers, `0.93 / 0.60` on conceptual questions. The reranker pulls
+conceptual answers *into* the top five that retrieval missed, while ordering them
+worse than plain retrieval does. Bounding its authority recovered the recall; the
+ordering gap is the open problem.
+
+Reproduce with `AI_API_KEY=... mix docs.eval --verbose`. A change that does not
+move these numbers did not work, whatever it looked like in a spot check.
+
+### On the latency budget
+
+400ms is not instant, and that is fine — but not for the reason it first appears.
+
+A single assistant turn is seconds of token generation, so 400ms is noise against
+it. The mechanism that actually matters is not a gradient of patience but a
+**hard wall**: Anubis' session `GenServer.call` gives up at 30s and the client has
+its own tool timeout. Below the wall, latency costs nothing behavioural; above it
+the call dies. So the tail is what needs protecting, not the median — a 400ms
+median with a 26s cold-ingest tail is a worse risk profile than a 900ms median
+with a 3s tail. That is why `INGEST_TIMEOUT_MS` sits at 25s with a progress
+notice, rather than the pipeline simply being fast on average.
+
+What justifies spending latency is that cost compounds through **retries**, not
+through the call. If the tool answers, the agent moves on; if it does not, the
+agent reformulates — a second tool call plus a whole extra model turn. A 400ms
+call that answers is much cheaper than a 50ms call that forces a second turn.
+Against that, the reranker's 390ms buys recall@5 from 0.92 to 0.96: one query in
+26 that no longer needs a retry. If a retry costs ~3s of model turn, it pays for
+itself above roughly a 4% retry-avoidance rate, and 0.04 is what was measured.
+
+The operating rule, then, is close to the opposite of "keep it snappy": **spend
+the median freely up to the wall when it buys correctness, and protect the tail
+absolutely.** Concurrency is not a factor, and not for the reason you might
+expect: an Anubis session holds one request in flight and queues the rest, so
+parallel tool calls are serialised before they ever reach the reranker. What that
+does mean is that a slow request consumes the timeout budget of everything queued
+behind it — see "One call at a time" below.
+
+## Worked examples
+
+Both of these are real questions from a session where the answer was genuinely
+unknown, and both are now regression queries in `mix docs.eval`. You do not call
+the tool yourself — you ask a normal question and the assistant decomposes it.
+
+### A question with no answer in your training data
 
 ```txt
-sketch an OAuth implementation for anubis_mcp without an external
-provider, using the Boruta package with Phoenix Plug
+can an MCP server ask the client's LLM to run a completion, and does
+anubis support it?
 ```
 
-A search is scoped to **one** package, so the Code assistant decomposes this into one
-call per package and consolidates the answers. It also writes a query per
-package using the terms that package's docs actually use, rather than sending
-your sentence twice.
+The assistant issues one call, using the vocabulary the package's own docs would
+use rather than the words in the question:
 
-Three things about the arguments it fills in:
+```elixir
+search_docs(package: "anubis_mcp",
+            query: "server requests a completion from the client model, sampling create message")
+```
 
-1. **Name the package exactly as it is on Hex** — `anubis_mcp`, not "Anubis" or
-   "the MCP library". The server matches `package` literally and never reads
-   package names out of your question; a name that appears only in the question
-   returns rows from unrelated packages that happen to share keywords.
+It returns `Anubis.Server.send_sampling_request/2` (server side),
+`Anubis.Client.register_sampling_callback/2` (client side), the guide section
+that explains sampling alongside roots and elicitation, and the callback's return
+shape — with a citable `hexdocs_url` on each.
 
-2. **You do not need to give a version.** The assistant reads it from your
-   project's `mix.lock` and passes it, because the (MCP) server cannot see your
-   lockfile — it only knows its own dependencies and Hex's latest *stable*
-   release. That inference is what makes naming the package enough. Without it
-   you would silently get the wrong line: `boruta` above is `3.0.0-beta.4`, while
-   Hex's latest stable is `2.3.8`, and nothing in the answer would say so.
+### A question whose answer shares no words with it
 
-3. **You can pin a version yourself** — "use boruta 3.0.0-beta.4" — but note it
-   is **not** a filter: only **one version** per package is kept, so asking for a version
-   that is not the indexed one **re-downloads it and replaces what is stored**.
-   Harmless when you mean it, surprising when you did not. `list_indexed_packages`
-   shows what is currently held.
+```txt
+how do I check the client declared a capability before sending it a request?
+```
 
-With the input above, the Code assistant will run:
+```elixir
+search_docs(package: "anubis_mcp",
+            query: "check whether the connected client declared a capability before sending a server request")
+```
+
+Rank 2 is `Anubis.Server.send_elicitation_request/3`, whose docstring happens to
+carry the rule for *all three* server-initiated request kinds:
+
+> The client must advertise the `elicitation` capability or the call returns
+> `{:error, :capability_not_supported}` after enqueueing.
+
+Nothing in the query lexically matches that function — no shared identifier, no
+shared phrasing. That is the vector arm doing the one thing BM25 structurally
+cannot, and it is the case the whole hybrid pipeline exists for.
+
+### What it does not tell you
+
+Both answers above are correct. Extrapolating from them was not: the docs say
+`roots` is supported and Claude Code advertises it, so sending a `roots/list`
+request looks safe — and it deadlocks the stdio transport in anubis_mcp 1.14.0,
+because `ServerRequests.send_to_transport/3` calls back into a transport already
+blocked on the session.
+
+`search_docs` tells you what a library **says**, reliably and with a citation. It
+cannot tell you what it **does** under your transport, at your concurrency, in
+your session. Interactions between processes are in no docstring.
+
+### One call at a time
+
+An Anubis session holds one MCP request in flight and queues the rest
+(`Session.Scheduler.enqueue_or_dispatch/5` dispatches only when `in_flight` is
+`nil`). Tool calls are therefore serialised, and issuing several in parallel buys
+nothing.
+
+It costs something, though: the transport's `GenServer.call(session, …, 30_000)`
+starts its clock when the request is *sent*, not when it is dispatched, so a slow
+request burns the budget of everything queued behind it. A 25s ingest leaves a
+queued search roughly 5s before its own transport call times out. This is the
+main reason `INGEST_TIMEOUT_MS` sits below the transport ceiling rather than at
+it.
+
+For tools called repeatedly in one turn — `remember` especially — take an array
+and iterate inside a single call rather than relying on parallel invocations that
+cannot happen.
+
+### Multi-package questions
+
+A search is scoped to **one** package, so a question spanning several becomes
+several calls, each written in that package's own vocabulary:
 
 ```elixir
 search_docs(package: "anubis_mcp", version: "1.14.0",
@@ -331,68 +498,5 @@ search_docs(package: "boruta", version: "3.0.0-beta.4",
             query: "authorize access token bearer Plug protect resource")
 ```
 
-Any package not already indexed is downloaded, chunked and embedded first. Each
-search then runs FTS5 candidate selection followed by vector re-ranking, and the
-assistant merges the two result sets:
-
-<details>
-<summary>Results:</summary>
-
-```markdown
-  ──────
-
- — anubis_mcp v1.14.0 + boruta v3.0.0-beta.4:
-
-1. Mount the MCP endpoint behind an auth pipeline
-
-transports.html#serving-over-http — the server process and the HTTP endpoint are separate: you supervise the first, mount the second.
-
-# lib/my_app_web/router.ex
-pipeline :mcp do
-  plug :accepts, ["json"]
-  plug MyAppWeb.Plugs.Authorization, :require_authenticated
-end
-
-scope "/mcp" do
-  pipe_through :mcp
-  forward "/", Anubis.Server.Transport.StreamableHTTP.Plug, server: MyApp.Server
-end
-
-# supervision tree
-children = [MyAppWeb.Endpoint, {MyApp.Server, transport: :streamable_http}]
-
-2. Authorize with Boruta's own bearer extraction
-
-authorize_requests.html — in a monolith you call the Boruta API directly; a Plug in the pipeline is the preferred shape.
-
-defmodule MyAppWeb.Plugs.Authorization do
-  import Plug.Conn
-  alias Boruta.Oauth.{Authorization, BearerToken, Scope}
-
-  def require_authenticated(conn, _opts) do
-    with {:ok, bearer} <- BearerToken.extract_token(conn),
-         {:ok, token} <- Authorization.AccessToken.authorize(value: bearer) do
-      assign(conn, :current_token, token)
-    else
-      _ -> conn |> put_status(:unauthorized) |> halt()
-    end
-  end
-end
-
-Scope enforcement is a second plug, applied per action:
-
-plug :authorize, ["resource:read"]  when action in [:index, :show]
-plug :authorize, ["resource:write"] when action in [:create, :update, :delete]
-
-3. Tag SSE subscribers with the authenticated subject
-
-Plug configuration options — :subscriber_metadata takes (Plug.Conn.t() -> map()), called when an SSE stream opens, letting you later target send_message_to_subscribers/4 by tenant or user:
-
-forward "/", Anubis.Server.Transport.StreamableHTTP.Plug,
-  server: MyApp.Server,
-  subscriber_metadata: &MyApp.sse_metadata/1   # remote capture survives plug option escaping
-
----
-  ```
-
-</details>
+Sending the same sentence to both matches neither well. Any package not already
+indexed is downloaded, chunked and embedded first.

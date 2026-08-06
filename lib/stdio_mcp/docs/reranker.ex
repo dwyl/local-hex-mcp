@@ -65,6 +65,73 @@ defmodule StdioMcp.Docs.Reranker do
     end
   end
 
+  # How much authority the cross-encoder gets, via AI_RERANK_STRATEGY:
+  #
+  #   fused  (default) — reciprocal-rank fusion of the retrieval order with the
+  #                      reranked one. The cross-encoder can move a document but
+  #                      not overrule retrieval outright.
+  #   pure             — cross-encoder ordering wins.
+  #   gated            — keep retrieval order when the best score is negative.
+  #
+  # Measured on the 26-query eval, same corpus:
+  #
+  #   strategy   all r@5   all MRR   concept r@5
+  #   pure          0.92      0.78          0.86
+  #   gated         0.92      0.77          0.86
+  #   fused         0.96      0.78          0.93
+  #
+  # The case that decides it: "prevent interception of the authorization code on
+  # a public client" against boruta. All three retrieval arms put the PKCE guide
+  # at rank 1; the cross-encoder drops it to 8, preferring `Boruta.Oauth.Client.t/0`
+  # — a typespec listing `pkce: boolean()` among thirty fields. It is not wrong
+  # to dislike the guide, which is a how-to that never explains *why* PKCE exists
+  # (every score in that pool is negative, meaning "nothing here answers this").
+  # But when the bi-encoder has bridged a gap the cross-encoder cannot see in the
+  # literal text, discarding retrieval's opinion entirely loses the answer.
+  # Fusion keeps both votes: rank 3 rather than 8.
+  defp strategy, do: System.get_env("AI_RERANK_STRATEGY", "fused")
+
+  # Swept 0 / 5 / 10 / 20 / 60 and it moves nothing: recall@5 and MRR are
+  # identical at every value bar 0.01 of aggregate MRR at k=0. Five of 26 queries
+  # shift by one rank, three one way and two the other — noise, not a gradient.
+  #
+  # Which is worth recording, because the score *spread* really does change (10x
+  # at k=0, 1.15x at k=60) and it is tempting to assume the ordering follows. Over
+  # ten items it mostly does not: at large k the ordering approximates rank-sum,
+  # at k=0 it weights the head, and the two only disagree when an item is extreme
+  # on one list and middling on the other.
+  #
+  # What mattered was the binary — whether retrieval's order votes at all, which
+  # took recall@5 from 0.92 to 0.96 — not how heavily it votes.
+  defp fusion_k, do: 60
+
+  defp apply_strategy(docs, scored) do
+    case strategy() do
+      "gated" ->
+        if scored |> Enum.map(&elem(&1, 0)) |> Enum.max() < 0,
+          do: docs,
+          else: sorted(scored)
+
+      "fused" ->
+        reranked = sorted(scored)
+
+        order =
+          StdioMcp.Docs.Fusion.rrf(
+            [Enum.map(docs, & &1.id), Enum.map(reranked, & &1.id)],
+            length(docs),
+            fusion_k()
+          )
+
+        by_id = Map.new(docs, &{&1.id, &1})
+        Enum.map(order, &by_id[&1])
+
+      _pure ->
+        sorted(scored)
+    end
+  end
+
+  defp sorted(scored), do: scored |> Enum.sort_by(&(-elem(&1, 0))) |> Enum.map(&elem(&1, 1))
+
   defp score_and_sort(query, docs) do
     pairs = Enum.map(docs, &{query, text(&1)})
 
@@ -72,10 +139,7 @@ defmodule StdioMcp.Docs.Reranker do
       results ->
         case scores(results, length(pairs)) do
           {:ok, scores} ->
-            scores
-            |> Enum.zip(docs)
-            |> Enum.sort_by(fn {score, _doc} -> -score end)
-            |> Enum.map(fn {_score, doc} -> doc end)
+            apply_strategy(docs, Enum.zip(scores, docs))
 
           :error ->
             Logger.warning(
@@ -95,11 +159,18 @@ defmodule StdioMcp.Docs.Reranker do
   # A short header rather than the full breadcrumb used for embedding: at the
   # compiled sequence length every token spent naming the package is a token not
   # spent on the text being judged.
+  # `function` is already module-qualified on modern ExDoc, so joining it to
+  # `module` produced "Boruta.Oauth.Client.Boruta.Oauth.Client.public?/1" — the
+  # module name twice, spending tokens at the compiled sequence length on nothing.
   defp text(doc) do
     header =
-      [doc.module, doc.function]
-      |> Enum.reject(&(&1 in [nil, ""]))
-      |> Enum.join(".")
+      case {to_string(doc.module), to_string(doc.function)} do
+        {_module, ""} ->
+          to_string(doc.module)
+
+        {module, function} ->
+          if String.starts_with?(function, module), do: function, else: module <> "." <> function
+      end
 
     body = doc.content |> to_string() |> String.slice(0, @max_chars)
 
