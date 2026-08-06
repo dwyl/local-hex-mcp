@@ -43,6 +43,10 @@ defmodule StdioMcp.MixProject do
       {:text_chunker, "~> 0.6"},
       {:jason, "~> 1.4"},
       {:lazy_html, "~> 0.1.12"},
+      {:mdex, "~> 0.13.5"},
+      {:bumblebee, "~> 0.7.1"},
+      {:exla, "~> 0.13.0"},
+      # {:emlx, "~> 0.4.1"},
       {:dialyxir, "~> 1.4", runtime: false},
       {:credo, "~> 1.7", runtime: false}
     ]

@@ -57,6 +57,7 @@ defmodule StdioMcp.Memory do
     run_fts_knowledge(base_query, query_text, limit)
   end
 
+  @spec process_remember(binary(), any()) :: :ok | {:error, :memory_disabled}
   def process_remember(text, request_id \\ nil) do
     if Client.memory_enabled?() do
       with {:ok, embedding} <- Client.embed(text),
@@ -65,11 +66,11 @@ defmodule StdioMcp.Memory do
            :ok <- log_decision(decision, neighbors),
            {:ok, result} <- apply_decision(decision) do
         Logger.info("[Memory] #{result.detail}")
-        record_outcome(request_id, decision, neighbors, result)
+        :ok = record_outcome(request_id, decision, neighbors, result)
       else
         {:error, reason} ->
           Logger.error("[Memory] Remember failed: #{inspect(reason)}")
-          record_failure(request_id, reason)
+          :ok = record_failure(request_id, reason)
       end
     else
       {:error, :memory_disabled}
@@ -83,6 +84,8 @@ defmodule StdioMcp.Memory do
   # tuple logged as "Saved". A submission dropped as a near-duplicate looked
   # exactly like a successful create.
 
+  @spec open_decision(String.t(), String.t()) ::
+          {:ok, Ecto.Schema.t()} | {:error, Ecto.Changeset.t()}
   def open_decision(request_id, submitted_text) do
     %Decision{}
     |> Decision.changeset(%{
@@ -93,6 +96,8 @@ defmodule StdioMcp.Memory do
     |> Repo.insert()
   end
 
+  @spec close_decision(binary(), map()) ::
+          {:ok, Ecto.Schema.t()} | {:error, Ecto.Changeset.t()}
   def close_decision(request_id, attrs) do
     case Repo.get_by(Decision, request_id: request_id) do
       nil -> {:error, :not_found}
@@ -100,6 +105,7 @@ defmodule StdioMcp.Memory do
     end
   end
 
+  @spec get_decision(String.t()) :: {:error, :not_found} | {:ok, any()}
   def get_decision(request_id) do
     case Repo.get_by(Decision, request_id: request_id) do
       nil -> {:error, :not_found}
@@ -107,6 +113,7 @@ defmodule StdioMcp.Memory do
     end
   end
 
+  @spec record_outcome(any(), term(), term(), map()) :: :ok
   defp record_outcome(nil, _decision, _neighbors, _result), do: :ok
 
   defp record_outcome(request_id, decision, neighbors, result) do
@@ -123,6 +130,7 @@ defmodule StdioMcp.Memory do
     :ok
   end
 
+  @spec record_failure(any(), term()) :: :ok
   defp record_failure(nil, _reason), do: :ok
 
   defp record_failure(request_id, reason) do
@@ -134,6 +142,7 @@ defmodule StdioMcp.Memory do
     :ok
   end
 
+  @spec top_similarity(term()) :: float()
   defp top_similarity([]), do: 0.0
 
   defp top_similarity(neighbors) do
@@ -162,6 +171,7 @@ defmodule StdioMcp.Memory do
     |> Repo.insert()
   end
 
+  @spec update(term(), term()) :: {:ok, Ecto.Schema.t()} | {:error, Ecto.Changeset.t()}
   def update(id, attrs) when is_integer(id) and is_map(attrs) do
     case Repo.get(Knowledge, id) do
       nil -> {:error, :not_found}
@@ -169,6 +179,7 @@ defmodule StdioMcp.Memory do
     end
   end
 
+  @spec deprecate(integer(), term()) :: {:ok, Ecto.Schema.t()} | {:error, Ecto.Changeset.t()}
   def deprecate(id, reason \\ nil) when is_integer(id) do
     case Repo.get(Knowledge, id) do
       nil ->

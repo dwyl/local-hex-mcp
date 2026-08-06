@@ -62,7 +62,7 @@ Launch `mix mcp.server` through a shell that changes directory first:
   "args": ["-c", "cd /absolute/path/to/local_hex_mcp && exec /opt/homebrew/bin/mix mcp.server --no-compile"],
   "env": {
     "MIX_ENV": "prod",
-    "MISTRAL_API_KEY": "…",
+    "AI_API_KEY": "…",
     "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
     "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
   }
@@ -82,7 +82,7 @@ Antigravity supports `cwd` natively:
   "cwd": "/absolute/path/to/local_hex_mcp",
   "env": {
     "MIX_ENV": "prod",
-    "MISTRAL_API_KEY": "…",
+    "AI_API_KEY": "…",
     "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
     "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
   }
@@ -99,6 +99,67 @@ Set in the `env` block of `.mcp.json` / `mcp_config.json`; they take effect on a
 | `EMBED_BATCH_SIZE` | `200` | Inputs per embeddings request. The provider rate-limits on *requests* per second, so a larger batch is the strongest lever against 429s. The ceiling is **tokens per request**, not input count — a 141-doc package has been rejected in a single batch — but that no longer needs tuning: a token-limit rejection is bisected automatically until the halves fit. |
 | `EMBED_CONCURRENCY` | `2` | Concurrent embedding requests. Bounded by the Finch pool (size 10) and the provider's rate limit — **not** by CPU count, since the work is IO-bound and a blocked process occupies no scheduler. |
 | `EMBED_PAUSE_MS` | `0` | Pause after each embedding request, for providers that limit *requests per second*. `0` means no pacing, which is what a capable endpoint wants. Raise it only if 429s persist after lowering concurrency. |
+
+### How `search_docs` retrieves
+
+Three stages, roughly 400ms end to end once the query embedding returns:
+
+1. **Two arms in parallel, shallow.** FTS5/BM25 top 15 and sqlite-vec cosine top
+   15, both scoped to the package before the cut.
+2. **Reciprocal rank fusion** to a pool of 10. This is a *union* — a document
+   either arm found can surface. Deeper arms measure worse, not better: RRF
+   rewards agreement, so 40-deep arms let mediocre-but-agreed rows displace a
+   strong single-arm hit.
+3. **Cross-encoder rerank** of those 10 (`AI_RERANK_MODEL`, default
+   `ms-marco-MiniLM-L-6-v2`, compiled at `sequence_length: 512`).
+
+Every stage degrades rather than fails: no embedding gives FTS-only, no reranker
+gives fused order, no keyword match gives vector-only.
+
+`mix docs.eval` measures all of it against a fixed 26-query set with ground truth
+resolved from the database. Run it before and after any change to chunking,
+tokenisation, fusion or reranking — `Notes.md` holds the control tables and the
+history of what moved them.
+
+### The index is single-model
+
+Every vector in `package_docs` must come from the same embedding model. Two
+models are never comparable: different dimensions make sqlite-vec raise (which
+`Docs.Search.run_query/4` rescues into a silent FTS-only search), and *identical*
+dimensions raise nothing at all while returning noise.
+
+`embedding_config` holds one row recording the model and dimension that built the
+index, written from the provider's actual response at the end of each ingest.
+
+- **Ingestion refuses** to write vectors from a different model than the recorded
+  one, before downloading anything — `{:error, {:embedding_model_mismatch, …}}`.
+- **Search disables the vector arm** on a mismatch and returns a `notices` entry
+  saying so, instead of raising into the rescue.
+- **`mix docs.reindex`** is the only supported way to change models: it clears the
+  record and re-embeds every indexed package. `--only pkg1,pkg2`, `--yes`,
+  `--keep-failed`. A package that fails is **dropped** rather than left stale, and
+  re-ingests on the next search that names it.
+
+Changing `AI_EMBED_MODEL` therefore always costs a full re-embed. That is a
+property of embeddings, not of this storage: a 1024-dim and a 1536-dim index are
+different vector spaces with no conversion between them.
+
+### Provider configuration is `AI_*`
+
+`AI_API_KEY`, `AI_API_URL`, `AI_EMBED_MODEL`, `AI_CHAT_MODEL_SMALL`,
+`AI_CHAT_MODEL_LARGE`. The endpoint is pluggable — Mistral, OpenAI, Gemini,
+Cohere. The legacy `MISTRAL_*` spellings **are not read**; if one is set without
+its `AI_*` counterpart, the server prints the replacement name to stderr and
+falls back to the default. A silent fallback to an unintended value is the same
+class of bug as the mixed-model index, so the legacy name gets a message and no
+effect.
+
+All of them are read in **one place**, `config/runtime.exs`, into the app env;
+`StdioMcp.AI.Client` reads only the app env. It used to read `System.get_env/1`
+first and fall back to the app env, which meant `runtime.exs` looked like the
+resolution point while actually being the second one — and the two disagreed, so
+setting `MISTRAL_MODEL_EMBED` on the command line was silently ignored by the
+client while appearing to work everywhere else.
 
 ### Applying code changes
 

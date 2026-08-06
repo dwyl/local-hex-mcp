@@ -1,37 +1,37 @@
 defmodule StdioMcp.AI.Client do
   @moduledoc "Generic REST client for embeddings and chat completions across Cloud AI providers."
 
-  def api_url do
-    System.get_env("AI_API_URL") ||
-      Application.get_env(:stdio_mcp, :ai_api_url, "https://api.mistral.ai/v1")
-  end
+  # Every one of these read `System.get_env/1` first and fell back to the app
+  # env, which made `config/runtime.exs` look like the place settings are
+  # resolved while it was actually only the *second* place — and the two did not
+  # agree. `runtime.exs` used to accept `MISTRAL_MODEL_EMBED` as an alternative
+  # spelling of `AI_EMBED_MODEL`, while this module only ever read the latter —
+  # so setting the legacy name on the command line was silently ignored here
+  # while appearing to take effect everywhere else. Both the second name and the
+  # second resolution point are gone.
+  #
+  # One resolution point now: `runtime.exs` reads the environment, this reads the
+  # app env. Still runtime, so a restart is all a new value needs.
+  def api_url, do: Application.get_env(:stdio_mcp, :ai_api_url, "https://api.mistral.ai/v1")
 
-  def api_key do
-    System.get_env("AI_API_KEY") ||
-      System.get_env("MISTRAL_API_KEY") ||
-      Application.get_env(:stdio_mcp, :ai_api_key)
-  end
+  def api_key, do: Application.get_env(:stdio_mcp, :ai_api_key)
 
-  def small_model do
-    System.get_env("AI_CHAT_MODEL_SMALL") ||
-      Application.get_env(:stdio_mcp, :ai_chat_model_small, "mistral-small-latest")
-  end
+  def small_model,
+    do: Application.get_env(:stdio_mcp, :ai_chat_model_small, "mistral-small-latest")
 
-  def large_model do
-    System.get_env("AI_CHAT_MODEL_LARGE") ||
-      Application.get_env(:stdio_mcp, :ai_chat_model_large, "mistral-medium-latest")
-  end
+  def large_model,
+    do: Application.get_env(:stdio_mcp, :ai_chat_model_large, "mistral-medium-latest")
 
-  def embed_model do
-    System.get_env("AI_EMBED_MODEL") ||
-      Application.get_env(:stdio_mcp, :ai_embed_model, "mistral-embed")
-  end
+  def embed_model, do: Application.get_env(:stdio_mcp, :ai_embed_model, "mistral-embed")
 
+  @spec memory_enabled?() :: boolean()
   def memory_enabled? do
     key = api_key()
     is_binary(key) and key != "" and is_binary(small_model()) and small_model() != ""
   end
 
+  @spec embed(binary()) ::
+          {:error, :missing_api_key} | {:ok, any()}
   def embed(text) when is_binary(text) do
     case embed_batch([text]) do
       {:ok, [vector]} -> {:ok, vector}
@@ -39,6 +39,8 @@ defmodule StdioMcp.AI.Client do
     end
   end
 
+  @spec embed_batch(maybe_improper_list()) ::
+          {:error, any()} | {:ok, list()}
   def embed_batch(texts) when is_list(texts) do
     key = api_key()
 
@@ -64,7 +66,7 @@ defmodule StdioMcp.AI.Client do
              receive_timeout: 60_000,
              finch: [name: StdioMcp.Finch]
            ) do
-        {:ok, %{status: 200, body: %{"data" => data} = resp_body}} ->
+        {:ok, %Req.Response{status: 200, body: %{"data" => data} = resp_body}} ->
           emit_usage(resp_body["usage"], model, :embedding)
           vectors = Enum.map(data, & &1["embedding"])
           {:ok, vectors}
@@ -72,10 +74,10 @@ defmodule StdioMcp.AI.Client do
         # Carries the server's Retry-After (in ms) rather than a message string,
         # so a caller retrying a batch can wait exactly as long as it is told to
         # instead of guessing. `nil` when the header is absent or unparsable.
-        {:ok, %{status: 429} = resp} ->
+        {:ok, %Req.Response{status: 429} = resp} ->
           {:error, {429, retry_after_ms(resp)}}
 
-        {:ok, %{status: status, body: err}} ->
+        {:ok, %Req.Response{status: status, body: err}} ->
           {:error, {status, err}}
 
         {:error, reason} ->
@@ -100,6 +102,8 @@ defmodule StdioMcp.AI.Client do
     end
   end
 
+  @spec chat(any()) ::
+          {:error, :missing_api_key} | {:ok, binary()}
   def chat(messages, _tools \\ [], opts \\ []) do
     key = api_key()
 
@@ -140,6 +144,7 @@ defmodule StdioMcp.AI.Client do
 
   # Supports both generic JSON object mode (opts: [json: true]) and strict JSON schema mode
   # (opts: [json_schema: schema, schema_name: "name", strict: true]).
+  @spec maybe_json_mode(map(), term()) :: map()
   defp maybe_json_mode(body, opts) do
     cond do
       schema = Keyword.get(opts, :json_schema) ->

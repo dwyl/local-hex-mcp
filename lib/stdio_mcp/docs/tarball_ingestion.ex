@@ -29,14 +29,15 @@ defmodule StdioMcp.Docs.TarballIngestion do
   """
 
   alias StdioMcp.AI.Client
+  alias StdioMcp.Docs.EmbeddingConfig
   alias StdioMcp.Docs.IngestionJob
+  alias StdioMcp.Docs.SectionChunker
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
 
   import Ecto.Query
   require Logger
 
-  @chunk_threshold 1500
   @user_agent {"user-agent", "stdio_mcp/1.0"}
 
   # Req's `:request_timeout` defaults to `:infinity`, and `:receive_timeout`
@@ -99,26 +100,36 @@ defmodule StdioMcp.Docs.TarballIngestion do
           {:ok, non_neg_integer(), String.t()} | {:error, term()}
   def ingest(package, version, docs_url \\ nil)
       when is_binary(package) and is_binary(version) do
-    with :ok <- IngestionJob.stage(:downloading),
+    base_url = docs_base_url(package, version, docs_url)
+    :ok = IngestionJob.stage(:downloading)
+
+    # Checked before the download, not after: a mixed-model index cannot be
+    # repaired by searching harder, and refusing costs one DB read where
+    # proceeding costs a tarball plus a full re-embed to produce vectors that are
+    # not comparable to anything already stored.
+    with :ok <- EmbeddingConfig.allow_ingest(Client.embed_model()),
          {:ok, tarball} <- download(package, version),
-         {:ok, files} <- extract(tarball),
-         {:ok, items} <- read_index(files) do
-      base_url = docs_base_url(package, version, docs_url)
+         {:ok, %{} = files} <- extract(tarball),
+         {:ok, items} <- read_index(files),
+         docs =
+           items
+           |> Enum.flat_map(&build_docs(&1, files, base_url))
+           |> Enum.map(&Map.put(&1, :package, package)),
 
-      docs = Enum.flat_map(items, &build_docs(&1, files, base_url))
+         # Embedding failure aborts the ingest instead of saving. Persisting rows
+         # with nil embeddings writes an index that looks complete, passes every
+         # count check, and is invisible to vector search — a silent, permanent
+         # quality loss that only a re-ingest can undo.
+         {:ok, embedded} <- attach_embeddings(docs) do
+      IngestionJob.stage(:saving)
 
-      # Embedding failure aborts the ingest instead of saving. Persisting rows
-      # with nil embeddings writes an index that looks complete, passes every
-      # count check, and is invisible to vector search — a silent, permanent
-      # quality loss that only a re-ingest can undo.
-      with {:ok, embedded} <- attach_embeddings(docs) do
-        IngestionJob.stage(:saving)
-
-        case save(embedded, package, version) do
-          {:ok, count} -> {:ok, count, version}
-          error -> error
-        end
+      case save(embedded, package, version) do
+        {:ok, count} -> {:ok, count, version}
+        error -> error
       end
+
+      # else
+      # {:error, reason} -> Logger.warning("[Embedding]: #{reason}")
     end
   end
 
@@ -277,7 +288,7 @@ defmodule StdioMcp.Docs.TarballIngestion do
     else
       {module, function} = split_ref(ref, title, type)
       url = "#{base_url}/#{ref}"
-      chunks = maybe_chunk(content)
+      chunks = SectionChunker.chunk(content)
       multi? = match?([_, _ | _], chunks)
 
       Enum.with_index(chunks, fn chunk, idx ->
@@ -285,14 +296,26 @@ defmodule StdioMcp.Docs.TarballIngestion do
           doc_type: type,
           module: module,
           function: function,
-          signature: if(multi?, do: "#{title} - Part #{idx + 1}", else: title),
-          content: chunk,
-          code_snippet: first_code_block(chunk),
+          signature: signature(title, chunk.path, idx, multi?),
+          content: chunk.text,
+          code_snippet: first_code_block(chunk.text),
           hexdocs_url: url
         }
       end)
     end
   end
+
+  # `signature` is displayed *and* fed to the embedding via `embed_text/1`, so
+  # naming the chunk is worth more than numbering it: "connect/1 — Allowed
+  # options" tells both a reader and the embedding model what the fragment is,
+  # where "connect/1 - Part 2" told neither. The ordinal stays only as the
+  # fallback for a document with no headings to borrow a name from, where it is
+  # at least honest about being one piece of several.
+  defp signature(title, _path, _idx, false), do: title
+
+  defp signature(title, [], idx, true), do: "#{title} - Part #{idx + 1}"
+
+  defp signature(title, path, _idx, true), do: "#{title} — #{Enum.join(path, " › ")}"
 
   # Falls back to the page when `search_data` has no text for an item, which is
   # 7–36% of items depending on the package. Markdown is preferred where the
@@ -333,78 +356,6 @@ defmodule StdioMcp.Docs.TarballIngestion do
       t when t in ~w(function macro callback type) -> {module, title}
       _ -> {module, nil}
     end
-  end
-
-  # RecursiveChunk walks its separator list and descends to the next one whenever
-  # a segment still exceeds `chunk_size`. The `:markdown` list leads with
-  # headings and "```\n\n", so it *wants* to break at a closing fence — but at
-  # 400 no code block fits, so it fell through to "\n\n", then "\n", and cut
-  # inside the blocks. Measured on gen_magic: 16 of 68 chunks left with an
-  # unbalanced fence. The size has to exceed the units meant to stay whole.
-  # (Library default is 2000; @chunk_threshold above means only content larger
-  # than 1500 is chunked at all.)
-  @chunk_size 1200
-  @chunk_overlap 100
-
-  defp maybe_chunk(content) when byte_size(content) <= @chunk_threshold, do: [content]
-
-  defp maybe_chunk(content) do
-    case TextChunker.split(content,
-           chunk_size: @chunk_size,
-           chunk_overlap: @chunk_overlap,
-           format: :markdown
-         ) do
-      chunks when is_list(chunks) ->
-        chunks |> Enum.map(& &1.text) |> balance_fences()
-
-      other ->
-        Logger.warning("[TarballIngestion] chunking failed (#{inspect(other)}) — storing whole")
-        [content]
-    end
-  end
-
-  # A larger chunk size makes mid-block splits rare, not impossible — one code
-  # block can still exceed it. A chunk that opens a fence without closing it
-  # isn't valid markdown: `first_code_block/1` needs a matching pair and returns
-  # nil without one, and the next chunk would start with a bare "```" that reads
-  # as content. Carrying the open state across the boundary closes each chunk and
-  # reopens the block in the next.
-  defp balance_fences(chunks) do
-    {balanced, _still_open?} =
-      Enum.map_reduce(chunks, false, fn chunk, open? ->
-        chunk = resume_block(chunk, open?)
-        now_open? = fence_open?(chunk)
-        chunk = if now_open?, do: chunk <> "\n```", else: chunk
-        {chunk, now_open?}
-      end)
-
-    balanced
-  end
-
-  defp resume_block(chunk, false), do: chunk
-
-  # The previous chunk had its block closed artificially, so this one continues
-  # it — but it may already *start* with the block's original closing fence,
-  # carried over by `chunk_overlap` or left there by a split landing exactly on
-  # it. Blindly re-opening in front of that produces an empty ```/``` pair, and
-  # `first_code_block/1` matches the first pair, so it captured "" rather than
-  # the real snippet: measured 11 of 43 chunks with a blank code_snippet.
-  # A leading fence is therefore a redundant closer, not the start of new code.
-  defp resume_block(chunk, true) do
-    case String.split(chunk, "```", parts: 2) do
-      [leading, rest] ->
-        if String.trim(leading) == "",
-          do: leading <> rest,
-          else: "```\n" <> chunk
-
-      _no_fence ->
-        "```\n" <> chunk
-    end
-  end
-
-  # An odd number of fences means the block is still open at the end of the text.
-  defp fence_open?(text) do
-    text |> String.split("```") |> length() |> rem(2) == 0
   end
 
   defp first_code_block(text) do
@@ -767,10 +718,40 @@ defmodule StdioMcp.Docs.TarballIngestion do
     )
     |> Enum.reduce_while({:ok, [], 0}, &collect_batch(&1, &2, total))
     |> case do
-      {:ok, acc, _done} -> {:ok, acc |> Enum.reverse() |> Enum.concat()}
-      {:error, reason} -> {:error, {:embedding_failed, reason}}
+      {:ok, acc, _done} ->
+        embedded = acc |> Enum.reverse() |> Enum.concat()
+        record_embedding_config(embedded)
+        {:ok, embedded}
+
+      {:error, reason} ->
+        {:error, {:embedding_failed, reason}}
     end
   end
+
+  # Recorded from the vectors themselves rather than from configuration: the
+  # dimension is a property of what the provider actually returned, and taking it
+  # from the response is what makes the record evidence instead of a restatement
+  # of the env var. Written after embedding succeeds, so a failed ingest leaves
+  # the previous record — and the previous rows — intact.
+  defp record_embedding_config([%{embedding: [_ | _] = vector} | _rest]) do
+    model = Client.embed_model()
+    dims = length(vector)
+
+    Logger.info("[TarballIngestion] embedded with #{model} (#{dims} dims)")
+
+    case EmbeddingConfig.record(model, dims) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        # The vectors are still good; only the record failed. Searches fall back
+        # to treating the index as unverified rather than refusing it.
+        Logger.warning("[TarballIngestion] could not record embedding config: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp record_embedding_config(_docs), do: :ok
 
   # Runs in the ingesting process, not the stream tasks, which is what makes the
   # progress update safe: Registry.update_value/3 only writes the *caller's* own
@@ -878,9 +859,23 @@ defmodule StdioMcp.Docs.TarballIngestion do
     min(@embed_backoff_ms * Integer.pow(2, attempt - 1), @embed_backoff_max_ms)
   end
 
+  # The package name leads because every search is scoped to one package, and a
+  # chunk that never says which library it belongs to sits in the same region of
+  # vector space as the identically-worded chunk from another. `signature` now
+  # carries the heading trail (see `signature/4`), which is what replaced the
+  # 100-byte overlap as the way a fragment states its context.
+  #
+  # `uniq` matters for stub rows. A moduledoc has `module` and `signature` both
+  # set to the module name, so the identifier was embedded twice — and for the
+  # 32% of rows carrying under 60 bytes of content there is nothing else in the
+  # vector to balance it:
+  #
+  #   "boruta Boruta.Oauth.ClientCredentialsRequest \
+  #    Boruta.Oauth.ClientCredentialsRequest Client credentials request"
   defp embed_text(doc) do
-    [doc.module, doc.function, doc.signature, doc.content]
+    [doc.package, doc.module, doc.function, doc.signature, doc.content]
     |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.uniq()
     |> Enum.join(" ")
   end
 

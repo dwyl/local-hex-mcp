@@ -1,11 +1,12 @@
 # Local Stdio MCP Server
 
-A lightweight Elixir MCP server designed to run over `stdio` transport with a local SQLite database.
+A lightweight Elixir MCP server designed to run over `stdio` transport with a local SQLite database and an `AI_API_KEY`.
 
 - `search_docs`: ask a question about an Elixir package; the tool answers from the local index, or downloads and digests the package first if it is not indexed yet. A first-time ingestion of a large package may exceed one tool call — the payload then reports progress and the job continues in the background.
 - `list_indexed_packages`: what is indexed, at which version, whether it is complete, and how that compares to the version this project depends on.
 - `remember`: save knowledge points (pattern, pain points)
 - `recall`: check your knowledge database
+- `search_gh_issues`: dig in a repo issues. This is not saved in the db.
 
 > you can check your LLM helper consumption with `get_token_usage`.
 
@@ -13,7 +14,9 @@ A lightweight Elixir MCP server designed to run over `stdio` transport with a lo
 
 - `SQLite` + FTS5 + `sqlite-vec`
 - `anubis_mcp`: Compatible with Claude Code, Cursor, and Google Antigravity CLI (`agy`).
-- AI models (embeddings, chat-small, chat-medium).
+- `MDEx` MarkDown parser, `lazy_html` (Lexbor) for older ExDcos version,
+- `Bumblebee` to run the cross-encoding reranker
+- Cloud AI models (embeddings, chat-small, chat-medium).
 
 >[!IMPORTANT]
 > It uses AI support for computing embeddings and chat completions; you must provide an **AI_API_KEY** and three models.
@@ -39,7 +42,7 @@ A lightweight Elixir MCP server designed to run over `stdio` transport with a lo
 
 ## Features
 
-- **Hybrid search**: FTS5 selects candidates, `vec_distance_cosine` re-ranks them by semantic similarity through sqlite-vec's native C layer. Narrowing first is both more accurate and ~2x faster than ranking a whole package by vector distance.
+- **Hybrid search**: FTS5 and`vec_distance_cosine` selects candidates, rank-fusion merging process and final cross-encoding reranking.
 - **Intelligent Knowledge Memory**: Multi-stage LLM curation pipeline (`decide`, `merge`, `append`, `discard`) powered by the LLM for deduplication and structuring.
 - **HexDocs ingestion**: fetches a package's docs tarball from Hex, extracts it in memory, and indexes it with embeddings on demand. One HTTP request per package, never a page-by-page crawl.
 - **Version-aware**: `latest` resolves to the version *this project depends on* when the package is a dependency, otherwise to Hex's latest stable release. One version per package is kept, so results never interleave versions.
@@ -75,6 +78,8 @@ DATABASE_PATH="priv/mcp.db" mix setup
 mix compile
 ```
 
+Copy `CLAUDE.md` (or `AGENTS.md`)
+
 ### AI Code Assistant Configuration
 
 **Claude Code / Cursor** (`.mcp.json`):
@@ -90,7 +95,7 @@ mix compile
       ],
       "env": {
         "MIX_ENV": "prod",
-        "MISTRAL_API_KEY": "your-key-here",
+        "AI_API_KEY": "your-key-here",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
       }
@@ -111,7 +116,7 @@ mix compile
       "env": {
         "MIX_ENV": "prod",
         "MIX_QUIET": "1",
-        "MISTRAL_API_KEY": "your-key-here",
+        "AI_API_KEY": "your-key-here",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
       }
     }
@@ -184,7 +189,7 @@ Replicate your SQLite database to cloud storage (S3, B2, etc.) for backup and po
 1. Install [Litestream](https://litestream.io/install/)
 2. Configure replication for `DATABASE_PATH`
 
-### MIsc: Knowledge Decision taxonomy
+### Misc: Knowledge Decision taxonomy
 
 | Action | When | What happens |
 | ----------- | ------------------------------------------------------- | --------------------------------------- |
@@ -194,6 +199,93 @@ Replicate your SQLite database to cloud storage (S3, B2, etc.) for backup and po
 | **merge** | Overlapping but complementary info | Synthesize old + new into one entry |
 | **replace** | Old info is factually wrong/superseded | Replace content of existing entry |
 | **deprecate** | Neighbor is outdated by new info | Mark old as `outdated=true` |
+
+## Search engine
+
+```mermaid
+flowchart TD
+    %% Custom Styling
+    classDef storage fill:#1e293b,stroke:#475569,stroke-width:1px,color:#f8fafc
+    classDef process fill:#0f172a,stroke:#3b82f6,stroke-width:1.5px,color:#f8fafc
+    classDef model fill:#312e81,stroke:#6366f1,stroke-width:1.5px,color:#f8fafc
+    classDef fusion fill:#064e3b,stroke:#10b981,stroke-width:1.5px,color:#f8fafc
+    classDef rerank fill:#701a75,stroke:#d946ef,stroke-width:1.5px,color:#f8fafc
+    classDef external fill:#451a03,stroke:#f97316,stroke-width:1.5px,color:#f8fafc
+
+    subgraph INGESTION ["1. Ingestion & Section Chunking Pipeline"]
+        direction TB
+        A[Hex.pm Package Tarball] --> B[Extract Markdown Docs]
+        B --> C["MDEx.parse_document!/1"]
+        C --> D[SectionChunker State Machine]
+        
+        subgraph CHUNK_BUILD ["Section Grouping & Enrichment"]
+            D --> E["Group AST Nodes by Headings\n(H1: Module, H2: Function)"]
+            E --> F["Inject Structural Breadcrumbs\n(Package > Module > Section)"]
+            F --> G["Generates Dual Output:\n• Raw Markdown (content)\n• Enriched Context Payload"]
+        end
+
+        G --> H["Mistral / Codestral API\n(Batched 1024-dim Embeddings)"]:::model
+        
+        G -->|Save Hydrated Docs| DB_DOCS[(SQLite: docs Table)]:::storage
+        H -->|Store Vector Blobs| DB_VEC[(SQLite: docs_vec Table)]:::storage
+        G -->|Auto-Triggers Sync| DB_FTS[(SQLite: docs_fts Trigram Table)]:::storage
+    end
+
+    subgraph QUERY_PIPE ["2. Parallel Hybrid Query Stage"]
+        direction TB
+        Q([User Search Query]) --> S1[QuerySanitizer]
+        Q --> S2["Embedding API\n(Mistral/Codestral)"]:::model
+
+        S1 -->|Preserves Symbols<br/>e.g. map /2 -> map/2| Q_FTS["Sanitized String"]
+        S2 -->|Generates 1024-dim Float List| Q_VEC["Query Vector"]
+
+        subgraph SQLITE_EXEC ["Single-Pass SQLite CTE Execution (< 5ms)"]
+            direction LR
+            Q_FTS -->|MATCH Trigram Index| DB_FTS
+            Q_VEC -->|Exact SIMD Cosine Scan| DB_VEC
+
+            DB_FTS -->|Rank BM25| FTS_TOP["Top 40 Lexical Candidates"]
+            DB_VEC -->|Rank Distance| VEC_TOP["Top 20 Vector Candidates"]
+        end
+    end
+
+    subgraph FUSION ["3. Candidate Fusion Stage"]
+        direction TB
+        FTS_TOP --> RRF_JOIN
+        VEC_TOP --> RRF_JOIN
+
+        subgraph RRF_JOIN ["SQLite CTE: FULL OUTER JOIN & RRF Scoring"]
+            direction TB
+            M1["1 / (60 + Lexical_Rank)"]
+            M2["1 / (60 + Vector_Rank)"]
+            M1 & M2 --> SUM["RRF Score = RRF_Lexical + RRF_Vector"]
+        end
+
+        RRF_JOIN --> TOP20["Fetch Top 20 Hydrated Chunks"]:::fusion
+    end
+
+    subgraph LIVE_ISSUES ["Alternative MCP Branch: Live Bug Diagnostics"]
+        direction TB
+        BUG_Q([User Bug / Stack Trace Query]) --> REQ_GH["Req.get/2 -> GitHub REST API"]:::external
+        REQ_GH -->|Fetch Top 10 Issue JSONs| RAW_ISSUES["Format Issue Payloads"]
+    end
+
+    subgraph RERANK ["4. Deep Cross-Encoder Reranking"]
+        direction TB
+        TOP20 --> PAIRS["Format Tuple Pairs:<br/>{User Query, Context-Enriched Text Payload}"]
+        RAW_ISSUES -.-> PAIRS
+
+        PAIRS --> EXLA["Nx.Serving / EXLA Engine\n(cross-encoder/ms-marco-MiniLM-L-6-v2)"]:::model
+        
+        EXLA -->|Joint-Attention Rescoring (~50ms)| SCORED["Logit Relevance Scores"]:::rerank
+        SCORED --> SORT["Sort Candidates by Cross-Encoder Score"]
+        SORT --> FINAL(["Return Top 3 to 5 Pristine MCP Results"]):::rerank
+    end
+
+    %% Class Assigns
+    class A,B,C,D,E,F,G,S1,PAIRS,SORT,RAW_ISSUES process
+    class DB_DOCS,DB_VEC,DB_FTS storage
+```
 
 ## Important example on how to use `search-docs`
 

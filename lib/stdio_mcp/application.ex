@@ -24,7 +24,8 @@ defmodule StdioMcp.Application do
         {Registry, keys: :unique, name: StdioMcp.IngestionRegistry},
         {Registry, keys: :duplicate, name: StdioMcp.IngestionWaiters},
         StdioMcp.Docs.RepairBudget,
-        {Task.Supervisor, name: StdioMcp.TaskSupervisor}
+        {Task.Supervisor, name: StdioMcp.TaskSupervisor},
+        {Nx.Serving, serving: serving_reranker(), name: Rerank}
       ] ++ mcp_children()
 
     opts = [strategy: :one_for_one, name: StdioMcp.Supervisor]
@@ -37,6 +38,50 @@ defmodule StdioMcp.Application do
       other ->
         other
     end
+  end
+
+  # defp set_backend() do
+  #   case :os.type() do
+  #     {:unix, :darwin} -> "EMLX"
+  #     _ -> "EXLA"
+  #   end
+  # end
+
+  # Not every reranker on HuggingFace loads here: `Bumblebee.Text.cross_encoding`
+  # needs an architecture Bumblebee implements with a sequence-classification
+  # head, which rules out most of the current state of the art before quality
+  # enters the picture. Checked 2026-08-06:
+  #
+  #   cross-encoder/ms-marco-MiniLM-L-6-v2       OK   Bert, 22M   (default)
+  #   cross-encoder/ms-marco-MiniLM-L-12-v2      OK   Bert, 33M
+  #   BAAI/bge-reranker-base                     OK   Roberta, 278M
+  #   mixedbread-ai/mxbai-rerank-xsmall-v1       no   DebertaV2 unsupported
+  #   jinaai/jina-reranker-v2-base-multilingual  no   custom arch, weights unreadable
+  #
+  # `sequence_length` is the setting that matters most and the one that looks
+  # least important. At 128 the query/document pair is truncated to roughly 400
+  # characters: a symbol query still works, because the identifier is in the
+  # header, while a conceptual answer usually sits deeper in the chunk and is
+  # simply not seen. Measured on the 26-query eval, reranking at 128 scored
+  # *worse* than not reranking at all (0.88 recall@5 against hybrid's 0.92); at
+  # 512 it scores 1.00. See Notes.md for the full sweep.
+  #
+  # `batch_size` should track the rerank depth: Nx.Serving pads a short batch to
+  # the compiled size, so a 10-candidate pool costs the same as 20 when compiled
+  # for 20.
+  @default_rerank_model "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+  def serving_reranker() do
+    repo = {:hf, System.get_env("AI_RERANK_MODEL", @default_rerank_model)}
+
+    {:ok, model_info} = Bumblebee.load_model(repo)
+    {:ok, tokenizer} = Bumblebee.load_tokenizer(repo)
+
+    %Nx.Serving{} =
+      Bumblebee.Text.cross_encoding(model_info, tokenizer,
+        defn_options: [compiler: EXLA],
+        compile: [batch_size: 10, sequence_length: 512]
+      )
   end
 
   # Adds a file log alongside the stderr handler, enabled by MCP_LOG_FILE.

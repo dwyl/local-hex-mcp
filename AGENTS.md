@@ -62,7 +62,7 @@ Launch `mix mcp.server` through a shell that changes directory first:
   "args": ["-c", "cd /absolute/path/to/local_hex_mcp && exec /opt/homebrew/bin/mix mcp.server --no-compile"],
   "env": {
     "MIX_ENV": "prod",
-    "MISTRAL_API_KEY": "…",
+    "AI_API_KEY": "…",
     "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
     "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
   }
@@ -82,7 +82,7 @@ Antigravity supports `cwd` natively:
   "cwd": "/absolute/path/to/local_hex_mcp",
   "env": {
     "MIX_ENV": "prod",
-    "MISTRAL_API_KEY": "…",
+    "AI_API_KEY": "…",
     "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
     "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
   }

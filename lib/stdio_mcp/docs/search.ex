@@ -2,10 +2,14 @@ defmodule StdioMcp.Docs.Search do
   @moduledoc "Hybrid FTS5 + sqlite-vec vector search over package docs."
   import Ecto.Query
   import SqliteVec.Ecto.Query
+  alias StdioMcp.Docs.EmbeddingConfig
+  alias StdioMcp.Docs.Fusion
   alias StdioMcp.Docs.HexPackage
   alias StdioMcp.Docs.IngestionJob
   alias StdioMcp.Docs.RepairBudget
   alias StdioMcp.Docs.TarballIngestion
+  alias StdioMcp.Docs.QuerySanitizer
+  alias StdioMcp.Docs.Reranker
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
   require Logger
@@ -59,8 +63,37 @@ defmodule StdioMcp.Docs.Search do
       |> scope_version(resolved_version || version)
       |> scope_examples(examples_only)
 
+    {embedding, config_notices} = verify_embedding_model(embedding)
+
     {results, query_notices} = run_query(base_query, query, embedding, limit)
-    {results, notices ++ query_notices}
+    {results, notices ++ config_notices ++ query_notices}
+  end
+
+  # Dropping the embedding here routes the search down the FTS-only clause of
+  # `run_query/4` — the same degraded behaviour a dimension mismatch already
+  # produced, except that it was reached by raising inside sqlite-vec and being
+  # swallowed by a rescue, so nothing distinguished it from a search that simply
+  # ranked badly. Same outcome, stated.
+  #
+  # Comparing model names catches the case a dimension check cannot: two models
+  # of the same width are equally incomparable, and cosine distance between their
+  # spaces is noise that raises nothing at all.
+  @spec verify_embedding_model(term()) :: {term(), notices()}
+  defp verify_embedding_model(nil), do: {nil, []}
+
+  defp verify_embedding_model(embedding) do
+    case EmbeddingConfig.check() do
+      {:mismatch, stored, current} ->
+        Logger.warning(
+          "[Docs.Search] embedding model mismatch: index built with #{stored}, " <>
+            "querying with #{current} — vector ranking disabled"
+        )
+
+        {nil, [EmbeddingConfig.mismatch_notice(stored, current)]}
+
+      _ok_or_unset ->
+        {embedding, []}
+    end
   end
 
   defp scope_package(query, package), do: from(d in query, where: d.package == ^package)
@@ -89,68 +122,50 @@ defmodule StdioMcp.Docs.Search do
 
   defp presence(_value), do: nil
 
-  # Hybrid: FTS5 candidates + vector re-ranking
+  # Retrieve shallow from both arms, fuse, rerank the fused head.
+  #
+  # This replaces an *intersection*: the previous query ordered by cosine and
+  # filtered with `d.id in subquery(fts_ids)`, so a document the vector arm
+  # ranked first but the keyword arm never matched could not be returned at all.
+  # Fusion makes it a union.
+  #
+  # The depths are measured, not chosen. 15 per arm and a fused head of 10 scored
+  # recall@5 1.00 on the eval set; 20 per arm scored 0.96, because RRF rewards
+  # agreement and deeper arms supply enough mediocre-but-agreed documents to
+  # displace a strong single-arm hit. Retrieving *more* is worse here.
+  @arm_depth 15
+  @rerank_depth 10
+
   @spec run_query(Ecto.Query.t(), String.t(), list() | String.t() | nil, pos_integer()) ::
           {[%StdioMcp.PackageDoc{}], notices()}
   defp run_query(base_query, query, vec, limit) when is_list(vec) or is_binary(vec) do
     vec_param = if is_list(vec), do: Jason.encode!(vec), else: vec
-    sanitized = sanitize_fts(query)
+    match = QuerySanitizer.to_match(query)
 
-    results =
-      if sanitized != "" do
-        # The MATCH has to sit in a standalone query against the FTS table.
-        # Written as `left_join ... where: MATCH(...) or ...` SQLite rejects it
-        # with "unable to use function MATCH in the requested context" — every
-        # call raised, the rescue below swallowed it, and the search silently
-        # degraded to FTS-only, never using the stored embeddings.
-        fts_ids =
-          from(f in "package_docs_fts",
-            where: fragment("package_docs_fts MATCH ?", ^sanitized),
-            select: f.rowid
-          )
+    arms = [fts_ids(base_query, match), vector_ids(base_query, vec_param)]
 
-        # This was `d.id in subquery(fts_ids) or (not is_nil(d.embedding) ...)`,
-        # which is two bugs in one clause. "FTS matches OR anything embedded"
-        # reduces to "anything embedded", so the FTS candidates were never
-        # actually narrowing anything — the re-ranking ran over the whole
-        # package. And the left side admitted rows with a nil embedding, which
-        # then reached vec_distance_cosine and raised, so a single legacy nil row
-        # took down every vector search for that package.
-        case Repo.all(hybrid_query(base_query, fts_ids, vec_param, limit)) do
-          # Keyword terms that match nothing should not mean "no results" —
-          # fall back to ranking the package by vector distance alone.
-          [] -> Repo.all(vector_query(base_query, vec_param, limit))
-          hits -> hits
-        end
-      else
-        # No useful FTS terms — pure vector search on rows with embeddings
-        Repo.all(vector_query(base_query, vec_param, limit))
-      end
+    case Fusion.rrf(arms, max(@rerank_depth, limit)) do
+      # Neither arm returned anything for this package — not an error, and not
+      # something reranking can rescue.
+      [] ->
+        {[], []}
 
-    {results, []}
+      ids ->
+        {ids |> hydrate() |> Reranker.rerank(query) |> Enum.take(limit), []}
+    end
   rescue
     e ->
-      Logger.warning("[Docs.Search] hybrid query failed: #{Exception.message(e)}")
-      # Fall back to FTS-only
+      Logger.warning("[Docs.Search] fused query failed: #{Exception.message(e)}")
       run_query(base_query, query, nil, limit)
   end
 
-  # FTS5-only (no embedding available)
+  # FTS5-only: no embedding available, or the vector arm was refused because the
+  # index was built by a different model.
   defp run_query(base_query, query, _vec, limit) do
-    sanitized = sanitize_fts(query)
-
     results =
-      if sanitized != "" do
-        from(d in base_query,
-          join: fts in "package_docs_fts",
-          on: d.id == fts.rowid,
-          where: fragment("package_docs_fts MATCH ?", ^sanitized),
-          order_by: [asc: fragment("rank")],
-          limit: ^limit
-        )
-        |> Repo.all()
-      else
-        from(d in base_query, limit: ^limit) |> Repo.all()
+      case QuerySanitizer.to_match(query) do
+        "" -> Repo.all(from(d in base_query, limit: ^limit))
+        match -> base_query |> fts_query(match, limit) |> Repo.all()
       end
 
     {results, []}
@@ -158,6 +173,47 @@ defmodule StdioMcp.Docs.Search do
     e ->
       Logger.warning("[Docs.Search] FTS query failed: #{Exception.message(e)}")
       {[], ["Search query failed: #{Exception.message(e)}"]}
+  end
+
+  # Both arms are scoped by joining `base_query`, which already carries the
+  # package, version and examples filters. Ranking the FTS table alone and
+  # filtering afterwards would spend the whole depth budget on other packages.
+  defp fts_ids(_base_query, ""), do: []
+
+  defp fts_ids(base_query, match) do
+    base_query
+    |> fts_query(match, @arm_depth)
+    |> select([d], d.id)
+    |> Repo.all()
+  end
+
+  defp fts_query(base_query, match, limit) do
+    from(d in base_query,
+      join: f in "package_docs_fts",
+      on: d.id == f.rowid,
+      where: fragment("package_docs_fts MATCH ?", ^match),
+      order_by: [asc: fragment("rank")],
+      limit: ^limit
+    )
+  end
+
+  defp vector_ids(base_query, vec_param) do
+    base_query
+    |> vector_query(vec_param, @arm_depth)
+    |> select([d], d.id)
+    |> Repo.all()
+  end
+
+  # `id in ^ids` returns rows in storage order, so the fused ranking has to be
+  # reimposed — otherwise the reranker receives its input in an arbitrary order
+  # and every tie it cannot break is decided by SQLite.
+  defp hydrate(ids) do
+    by_id =
+      from(d in PackageDoc, where: d.id in ^ids)
+      |> Repo.all()
+      |> Map.new(&{&1.id, &1})
+
+    Enum.flat_map(ids, fn id -> List.wrap(Map.get(by_id, id)) end)
   end
 
   # Rows without an embedding are excluded everywhere a cosine ordering is used:
@@ -168,21 +224,6 @@ defmodule StdioMcp.Docs.Search do
       order_by: [asc: vec_distance_cosine(d.embedding, ^vec_param)],
       limit: ^limit
     )
-  end
-
-  defp hybrid_query(base_query, fts_ids, vec_param, limit) do
-    from(d in vector_query(base_query, vec_param, limit),
-      where: d.id in subquery(fts_ids)
-    )
-  end
-
-  # Sanitize query for FTS5: strip punctuation, join with OR
-  @spec sanitize_fts(String.t()) :: String.t()
-  defp sanitize_fts(query) do
-    query
-    |> String.replace(~r/[^\w\s]/, " ")
-    |> String.split()
-    |> Enum.join(" OR ")
   end
 
   # Ingestion decision. `package` is a non-blank binary and `requested` is either
@@ -211,6 +252,7 @@ defmodule StdioMcp.Docs.Search do
   end
 
   # Nothing stored: resolve and ingest.
+  @spec decide(String.t(), String.t(), term()) :: {list(), String.t()}
   defp decide(package, requested, nil) do
     case resolve_target(package, requested) do
       {:ok, target, docs_url} -> ingest(package, target, docs_url)
@@ -218,9 +260,7 @@ defmodule StdioMcp.Docs.Search do
     end
   end
 
-  # An explicit version that is already the stored one needs no Hex lookup at
-  # all: it demonstrably exists, because we ingested it. This is the fully-cached
-  # path and it makes no network call.
+  # fully-cached path and it makes no network call.
   defp decide(package, stored, stored) do
     serve_or_repair(package, stored, nil)
   end
@@ -271,10 +311,11 @@ defmodule StdioMcp.Docs.Search do
   # Complete data is served as-is. Incomplete data is worth re-ingesting, but
   # only within budget: repair was once unbounded and a package that could not be
   # re-embedded re-downloaded its tarball on every single search forever.
+  @spec serve_or_repair(String.t(), String.t(), term()) :: {list(), String.t()}
   defp serve_or_repair(package, version, docs_url) do
     case missing_embeddings(package, version) do
       0 ->
-        RepairBudget.clear(package, version)
+        :ok = RepairBudget.clear(package, version)
         {[], version}
 
       missing ->
@@ -296,7 +337,7 @@ defmodule StdioMcp.Docs.Search do
           {:ok, String.t(), String.t() | nil} | {:error, notices()}
   defp resolve_target(package, requested) do
     case HexPackage.fetch(package) do
-      {:ok, meta} -> target_from(meta, package, requested)
+      {:ok, %StdioMcp.Docs.HexPackage{} = meta} -> target_from(meta, package, requested)
       {:error, :not_found} -> {:error, ["No such package on Hex: '#{package}'."]}
       {:error, reason} -> {:error, ["Could not reach Hex for '#{package}': #{inspect(reason)}."]}
     end
@@ -373,6 +414,7 @@ defmodule StdioMcp.Docs.Search do
     ArgumentError -> nil
   end
 
+  # DB lookup for the `package` version
   @spec stored_version(String.t()) :: String.t() | nil
   defp stored_version(package) do
     Repo.one(from(d in PackageDoc, where: d.package == ^package, select: d.version, limit: 1))
@@ -455,6 +497,13 @@ defmodule StdioMcp.Docs.Search do
 
   defp handle_ingest_result({:ok, {:error, {:no_docs, ver}}}, package) do
     {["No docs published for '#{package}' v#{ver} and could not detect a served version."], nil}
+  end
+
+  # Refusing to ingest under a second embedding model is a decision, not a
+  # failure, and `inspect/1` on the tuple would report it as one. The caller
+  # needs the fix, which is a command, not an error term.
+  defp handle_ingest_result({:ok, {:error, {:embedding_model_mismatch, stored, current}}}, _pkg) do
+    {[EmbeddingConfig.mismatch_notice(stored, current)], nil}
   end
 
   defp handle_ingest_result({:ok, {:error, reason}}, package) do

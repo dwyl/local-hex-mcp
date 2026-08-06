@@ -3,11 +3,11 @@ defmodule StdioMcp.TokenUsageLog do
   import Ecto.Changeset
 
   schema "token_usage_logs" do
-    field :model, :string
-    field :type, :string
-    field :prompt_tokens, :integer, default: 0
-    field :completion_tokens, :integer, default: 0
-    field :total_tokens, :integer, default: 0
+    field(:model, :string)
+    field(:type, :string)
+    field(:prompt_tokens, :integer, default: 0)
+    field(:completion_tokens, :integer, default: 0)
+    field(:total_tokens, :integer, default: 0)
 
     timestamps(updated_at: false)
   end

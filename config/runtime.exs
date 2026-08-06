@@ -1,17 +1,39 @@
 import Config
 
+# `AI_*` is the canonical spelling for every provider setting. The endpoint is
+# pluggable — Mistral, OpenAI, Gemini, Cohere all speak a close-enough
+# embeddings API — and naming the variables after one vendor made the config
+# read as though it were not.
+#
+# The `MISTRAL_*` spellings no longer resolve to anything. They are still
+# *detected*, and only so the server can say so: two names for one setting, with
+# precedence between them, is how `anubis_mcp` came to be indexed at 1536
+# dimensions (codestral-embed) while every query embedded at 1024
+# (mistral-embed). sqlite-vec refuses that pair, `Docs.Search.run_query/4`
+# rescues the error, and the search answers from FTS alone — the vector arm was
+# dead for that package and nothing reported it. A fallback that quietly supplies
+# a value the operator did not intend is the same failure in a smaller costume,
+# so the legacy name gets a sentence and no effect.
+#
+# stderr, not stdout: stdout carries JSON-RPC and must stay clean.
+for {legacy, canonical} <- [
+      {"MISTRAL_API_URL", "AI_API_URL"},
+      {"MISTRAL_API_KEY", "AI_API_KEY"},
+      {"MISTRAL_MODEL_EMBED", "AI_EMBED_MODEL"},
+      {"MISTRAL_MODEL_SMALL", "AI_CHAT_MODEL_SMALL"},
+      {"MISTRAL_LARGE_MODEL", "AI_CHAT_MODEL_LARGE"}
+    ],
+    not is_nil(System.get_env(legacy)),
+    is_nil(System.get_env(canonical)) do
+  IO.puts(:stderr, "[config] #{legacy} is no longer read — rename it to #{canonical}")
+end
+
 config :stdio_mcp,
-  ai_api_url:
-    System.get_env("AI_API_URL") || System.get_env("MISTRAL_API_URL", "https://api.mistral.ai/v1"),
-  ai_api_key: System.get_env("AI_API_KEY") || System.get_env("MISTRAL_API_KEY"),
-  ai_embed_model:
-    System.get_env("AI_EMBED_MODEL") || System.get_env("MISTRAL_MODEL_EMBED", "mistral-embed"),
-  ai_chat_model_small:
-    System.get_env("AI_CHAT_MODEL_SMALL") ||
-      System.get_env("MISTRAL_MODEL_SMALL", "mistral-small-latest"),
-  ai_chat_model_large:
-    System.get_env("AI_CHAT_MODEL_LARGE") ||
-      System.get_env("MISTRAL_LARGE_MODEL", "mistral-large-latest"),
+  ai_api_url: System.get_env("AI_API_URL", "https://api.mistral.ai/v1"),
+  ai_api_key: System.get_env("AI_API_KEY"),
+  ai_embed_model: System.get_env("AI_EMBED_MODEL", "mistral-embed"),
+  ai_chat_model_small: System.get_env("AI_CHAT_MODEL_SMALL", "mistral-small-latest"),
+  ai_chat_model_large: System.get_env("AI_CHAT_MODEL_LARGE", "mistral-large-latest"),
   github_api_url: System.get_env("GITHUB_API_URL", "https://api.github.com"),
   github_token: System.get_env("GITHUB_TOKEN"),
   hex_api_url: System.get_env("HEX_API_URL", "https://hex.pm/api")

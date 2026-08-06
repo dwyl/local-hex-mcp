@@ -77,6 +77,7 @@ defmodule StdioMcp.Docs.IngestionJob do
 
   # -- Starting ---------------------------------------------------------------
 
+  @spec ensure_started(term(), term()) :: {:ok, pid} | {:error, term()}
   defp ensure_started(key, work) do
     case Registry.lookup(@jobs, key) do
       [{pid, _meta}] ->
@@ -96,7 +97,7 @@ defmodule StdioMcp.Docs.IngestionJob do
     case Registry.register(@jobs, key, meta) do
       {:ok, _} ->
         Process.put(:ingestion_job_key, key)
-        broadcast(key, execute(key, work))
+        :ok = broadcast(key, execute(key, work))
 
       {:error, {:already_registered, _}} ->
         :ok
@@ -119,7 +120,7 @@ defmodule StdioMcp.Docs.IngestionJob do
 
   defp broadcast(key, result) do
     Registry.dispatch(@waiters, key, fn entries ->
-      Enum.each(entries, fn {pid, _} -> send(pid, {:ingestion_done, key, result}) end)
+      :ok = Enum.each(entries, fn {pid, _} -> send(pid, {:ingestion_done, key, result}) end)
     end)
   end
 

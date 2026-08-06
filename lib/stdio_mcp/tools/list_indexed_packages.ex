@@ -18,6 +18,8 @@ defmodule StdioMcp.Tools.ListIndexedPackages do
   import Ecto.Query
 
   alias Anubis.Server.Response
+  alias StdioMcp.AI.Client
+  alias StdioMcp.Docs.EmbeddingConfig
   alias StdioMcp.Docs.HexPackage
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
@@ -52,6 +54,7 @@ defmodule StdioMcp.Tools.ListIndexedPackages do
 
     payload = %{
       database: database_path(),
+      embedding: embedding_info(),
       packages: packages,
       total_packages: length(packages),
       total_docs: Enum.sum(Enum.map(packages, & &1.docs))
@@ -61,6 +64,31 @@ defmodule StdioMcp.Tools.ListIndexedPackages do
   rescue
     e ->
       {:reply, Response.text(Response.tool(), "Listing failed: #{Exception.message(e)}"), frame}
+  end
+
+  # Which model built the vectors decides whether semantic ranking works at all,
+  # and it used to be visible nowhere: the only way to learn it was to count the
+  # commas in a stored JSON array. An index built by one model and queried by
+  # another either raises inside sqlite-vec — rescued by `Docs.Search` into a
+  # silent FTS-only search — or, at equal width, returns noise while raising
+  # nothing. `matches_config?: false` is that condition, stated before it can be
+  # mistaken for bad ranking.
+  defp embedding_info do
+    current = Client.embed_model()
+
+    case EmbeddingConfig.get() do
+      nil ->
+        %{
+          index_model: nil,
+          query_model: current,
+          note:
+            "This index predates embedding-model tracking, so what built it is " <>
+              "unknown. `mix docs.reindex` re-embeds everything and records it."
+        }
+
+      %{model: model, dims: dims} ->
+        %{index_model: model, dims: dims, query_model: current, matches_config?: model == current}
+    end
   end
 
   # `app_version` is the version loaded in *this server's* BEAM — the deps of the

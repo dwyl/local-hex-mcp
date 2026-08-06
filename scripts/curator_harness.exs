@@ -27,7 +27,7 @@ reset? = Keyword.get(opts, :reset, true)
 pause_ms = Keyword.get(opts, :pause, 1_500)
 
 unless StdioMcp.AI.Client.memory_enabled?() do
-  IO.puts(:stderr, "AI_API_KEY / MISTRAL_API_KEY not set — curation is disabled, aborting.")
+  IO.puts(:stderr, "AI_API_KEY not set — curation is disabled, aborting.")
   System.halt(1)
 end
 

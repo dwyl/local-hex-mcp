@@ -3,16 +3,16 @@ defmodule StdioMcp.PackageDoc do
   import Ecto.Changeset
 
   schema "package_docs" do
-    field :package, :string
-    field :version, :string
-    field :doc_type, :string
-    field :module, :string
-    field :function, :string
-    field :signature, :string
-    field :content, :string
-    field :code_snippet, :string
-    field :hexdocs_url, :string
-    field :embedding, :string
+    field(:package, :string)
+    field(:version, :string)
+    field(:doc_type, :string)
+    field(:module, :string)
+    field(:function, :string)
+    field(:signature, :string)
+    field(:content, :string)
+    field(:code_snippet, :string)
+    field(:hexdocs_url, :string)
+    field(:embedding, :string)
 
     timestamps()
   end
