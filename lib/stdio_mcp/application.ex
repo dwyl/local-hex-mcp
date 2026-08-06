@@ -147,7 +147,20 @@ defmodule StdioMcp.Application do
   # `mix mcp.server` sets MCP_TRANSPORT itself, so client configs need no change.
   defp mcp_children do
     if stdio_transport?() do
-      [{StdioMcp.MCPServer, transport: :stdio}]
+      # Anubis expires a session after 30 minutes with no request and does not
+      # tell the client. Claude Code goes on showing the server as connected, and
+      # the next tool call reaches a transport with no session to dispatch to —
+      # it hangs until the client's own timeout rather than failing fast.
+      #
+      # Thirty minutes of no *tool calls* is completely ordinary in a coding
+      # session: you edit, run tests, read, think. Observed exactly that today,
+      # a 5-hour gap between searches, and both calls hung past 120s with
+      # `no_session` in the log.
+      #
+      # The timeout exists for HTTP transports holding many sessions. A stdio
+      # server has exactly one, and it should live as long as the transport, so
+      # this is set to a working day rather than tuned.
+      [{StdioMcp.MCPServer, transport: :stdio, session_idle_timeout: to_timeout(hour: 8)}]
     else
       []
     end

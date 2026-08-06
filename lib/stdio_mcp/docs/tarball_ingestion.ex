@@ -392,29 +392,31 @@ defmodule StdioMcp.Docs.TarballIngestion do
 
   defp markdown_section(md, nil), do: md
 
-  # A markdown page carries two kinds of heading and they need different matching:
+  # A markdown page carries two kinds of heading and they anchor differently:
   #
-  #   prose sections   "## Provided options"  ->  anchor "module-provided-options"
-  #   member headings  "# `bind_value`"       ->  anchor "t:bind_value/0"
+  #   prose section    "## Provided options"  ->  anchor "module-provided-options"
+  #   member heading   "# `bind_value`"       ->  anchor "t:bind_value/0"
   #
-  # Slugifying works for the first and fails for the second, because `slug/1`
-  # strips underscores (markdown `_emphasis_`), turning `bind_value` into
-  # "bindvalue". Members are identifiers, not prose, so they are compared
-  # verbatim after removing backticks, while the anchor sheds its `t:`/`c:`
-  # prefix and `/arity` suffix.
+  # This used to scan lines with `~r/^\#{1,6}\s+(.*)$/u` and then guess which kind
+  # it had by string shape, which failed on members: `slug/1` strips underscores
+  # as emphasis markers, so `bind_value` became "bindvalue" and never matched.
+  # The workaround was to try both a slug *and* a verbatim comparison and hope
+  # exactly one hit.
+  #
+  # `SectionChunker.headings/1` removes the guess. A member heading is a
+  # `%MDEx.Code{}` span carrying no prose beside it, which is a fact about the
+  # document rather than an inference from its punctuation, and the code span's
+  # literal is already free of backticks. Slugging is still needed for prose —
+  # that is ExDoc's anchor convention, not something the AST knows — but it now
+  # runs on extracted text instead of raw markdown, which is where the bug was.
   defp markdown_section(md, anchor) do
-    lines = String.split(md, "\n")
     targets = anchor_targets(anchor)
+    lines = String.split(md, "\n")
 
-    start =
-      Enum.find_index(lines, fn line ->
-        case Regex.run(~r/^\#{1,6}\s+(.*)$/u, line) do
-          [_, heading] -> slug(heading) in targets or member_name(heading) in targets
-          _ -> false
-        end
-      end)
-
-    case start do
+    md
+    |> SectionChunker.headings()
+    |> Enum.find(fn {_level, text, code, _from, _to} -> matches?(text, code, targets) end)
+    |> case do
       # Returning the whole document here is what produced the duplication this
       # replaced: every one of a module's members resolved to the same 14k file,
       # which then chunked into a dozen parts and was stored once per member —
@@ -423,11 +425,18 @@ defmodule StdioMcp.Docs.TarballIngestion do
       nil ->
         ""
 
-      start ->
-        rest = Enum.drop(lines, start + 1)
-        len = Enum.find_index(rest, &Regex.match?(~r/^\#{1,6}\s+/u, &1)) || length(rest)
-        [Enum.at(lines, start) | Enum.take(rest, len)] |> Enum.join("\n") |> String.trim()
+      {_level, _text, _code, from, to} ->
+        lines |> Enum.slice((from - 1)..(to - 1)//1) |> Enum.join("\n") |> String.trim()
     end
+  end
+
+  # A code-only heading is an identifier and is compared verbatim; anything with
+  # prose is slugged. A heading mixing both ("Nested `code` here") slugs its full
+  # rendered text, which is what ExDoc anchors it by.
+  defp matches?("", code, targets) when code != "", do: String.downcase(code) in targets
+
+  defp matches?(text, code, targets) do
+    [text, code] |> Enum.reject(&(&1 == "")) |> Enum.join(" ") |> slug() |> Kernel.in(targets)
   end
 
   defp anchor_targets(anchor) do
@@ -440,10 +449,6 @@ defmodule StdioMcp.Docs.TarballIngestion do
       |> String.downcase()
 
     [anchor, base, member]
-  end
-
-  defp member_name(heading) do
-    heading |> String.replace("`", "") |> String.trim() |> String.downcase()
   end
 
   defp slug(heading) do
@@ -522,17 +527,21 @@ defmodule StdioMcp.Docs.TarballIngestion do
   defp find_by_id(nodes, id) when is_list(nodes), do: Enum.find_value(nodes, &find_by_id(&1, id))
 
   defp find_by_id({_tag, attrs, children} = node, id) do
-    if Enum.any?(attrs, fn {k, v} -> k == "id" and v == id end) do
-      node
-    else
-      case find_by_id(children, id) do
-        nil -> nil
-        found -> if blank?(found), do: node, else: found
-      end
-    end
+    if has_id?(attrs, id),
+      do: node,
+      else: resolve(node, find_by_id(children, id))
   end
 
   defp find_by_id(_other, _id), do: nil
+
+  # Dispatch rather than a nested `case`: the child search either missed, or found
+  # the empty `<span id="perform/2">` of an older ExDoc page — in which case the
+  # answer is this node, the ancestor that actually holds the documentation.
+  defp resolve(_node, nil), do: nil
+  defp resolve(node, found), do: if(blank?(found), do: node, else: found)
+
+  defp has_id?(attrs, id),
+    do: Enum.any?(attrs, fn {key, value} -> key == "id" and value == id end)
 
   defp blank?(node), do: node |> node_text() |> String.trim() == ""
 
@@ -646,8 +655,7 @@ defmodule StdioMcp.Docs.TarballIngestion do
   # Emitting a fenced block is what makes `first_code_block/1` work on the HTML
   # path at all: it looks for ``` fences, HTML-derived content had none, so
   # `code_snippet` was silently nil for every older package and
-  # `include_examples_only` returned nothing for them. It also gives TextChunker
-  # (running in `:markdown` format) a real code block to avoid splitting.
+  # `include_examples_only` returned nothing for them.
   defp node_text({"pre", _attrs, children}, _pre?) do
     "\n```\n" <> String.trim(node_text(children, true)) <> "\n```\n"
   end

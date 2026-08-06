@@ -9,12 +9,19 @@
   - **Grepping vs search_docs**: Use `grep` on `deps/` for quick function signatures of installed code. Use `search_docs` for conceptual guides, configuration patterns, code examples, or evaluating uninstalled packages.
   - **Version resolution**: omitting `version` means "latest", which resolves to the version loaded in **the MCP server's own BEAM** (via `:application.get_key/2`), otherwise to Hex's **latest stable** release. Note the latter is *not* the newest release: `ex_mcp` publishes `1.0.0-rc.4` while hexdocs.pm serves `0.12.0`. An unpublished version is refused with the list of real releases.
   - **`app_version` is the *server's* dependency, not yours.** `:application.get_key/2` inspects the running BEAM, which was started from the directory in the MCP config — not the repo you are editing. If the server runs from `local_hex_mcp`, then `phoenix`, `plug`, `boruta` and anything else it does not itself depend on return `undefined`, and resolution falls back to Hex latest stable regardless of what *your* project locks.
-  - **Resolve the version from the project, not from the server.** The user should never have to type a version. Before searching a package the *current project* depends on, read its locked version from `mix.lock` (or `mix.exs`) and pass it as `version`. Omitting it does NOT fall back to the project's deps — it hands resolution to the server, which sees only its own BEAM and then Hex latest stable, and silently answers about a different version. Reading the lockfile is possible because the assistant has filesystem access to the repo being edited; the server does not.
-    - If the package is **not** a dependency — evaluating a library, reading someone else's docs — omit `version`. Hex latest stable is the right answer when nothing local pins it.
-  - **When to pass `version` explicitly.**
-    - Working **in the repo the server runs from**: not needed for its own dependencies — resolution already picks the locked version, with no network call. Pass it only for a deliberately pinned pre-release, otherwise every search re-fetches Hex metadata and re-attaches the "ahead of stable" notice.
-    - Working **in any other repo**: pass it whenever the answer must match your lockfile. The server cannot see your `mix.lock`, so `latest` means Hex latest stable, which may be an older or newer line than you run. `list_indexed_packages` shows `app_version: null` for exactly these packages — that null is the signal that nothing local is pinning the version for you.
-    - Cleanest fix for multi-repo use: run one server per project (own `cwd` and own `DATABASE_PATH`). Then `app_version` reflects that project, and the packages cannot overwrite each other, since only one version per package is kept.
+  - **`PROJECT_ROOT` removes the need to pass `version` at all.** Set it in the server's `env` block to the repo being edited, and the server reads that project's `mix.lock` itself — freshly on every lookup, so `mix deps.get` mid-session is picked up without a restart. Resolution order becomes:
+
+    ```
+    explicit version:  ->  $PROJECT_ROOT/mix.lock  ->  the server's own BEAM  ->  Hex latest stable
+    ```
+
+    The lockfile is authoritative and may point *backwards*: a project on `boruta 2.3.0` gets 2.3.0 docs even though 3.0.0-beta.4 exists. Refusing to "downgrade" would silently serve documentation for code the project does not run.
+
+    Without `PROJECT_ROOT`, the old rule applies and you must pass `version` yourself: omitting it hands resolution to the server, which sees only its own BEAM and then Hex latest stable, and answers about a different version without saying so.
+
+  - **One `DATABASE_PATH` and `PROJECT_ROOT` per project.** Only one version per package is kept, so two projects sharing a database evict each other and re-embed on every switch. The search reports this when it happens, but the fix is configuration, not retries.
+  - **When to pass `version` explicitly.** With `PROJECT_ROOT` set, essentially never — pass it only to read a version the project does *not* run (comparing against a newer release, checking what changed). Without it, pass it whenever the answer must match your lockfile.
+    - For a package that is **not** a dependency — evaluating a library, reading someone else's docs — omit it either way. Nothing local pins it, so Hex latest stable is the right answer.
   - **One version per package.** Ingesting prunes every other version of that package. There is never a mix, and a search never interleaves versions.
   - **`refresh: true`** re-downloads and replaces what is indexed. Use it when docs look stale or the index looks wrong; do NOT pass it routinely, since it costs a full download plus re-embedding of every doc.
     - For a package **in this project's deps**, refresh resolves to the version you run — it cannot switch you to another version.
@@ -37,7 +44,7 @@
     2. **On Second Iteration**: If the first code edit fails to fix an error, run `recall` on the specific function/module before making a second edit.
     3. **Before Modifying Config**: Run `recall` before editing `Caddyfile`, `docker-compose.yml`, `runtime.exs`, or OAuth configs.
 
-- **`remember`**: Save a technical learning or pain point to the knowledge base.
+- **`remember`**: Save technical learnings or pain points to the knowledge base. Takes `texts`, a **list** — pass every lesson from a session in one call. An Anubis session holds one request in flight and queues the rest, so repeated calls buy no parallelism and cost a model turn each; the batch is also curated sequentially, which avoids the rate limiting that concurrent submissions provoke. A single lesson is a one-element list. Returns immediately with a `request_id` per entry — curation runs in the background and may discard, merge or replace what you sent.
   - **Execute AFTER fixing**:
     1. **The 2+ Attempt Rule**: Call `remember` ONLY IF the fix required 2 or more failed attempts to solve. Ignore 1-attempt fixes (typos, simple syntax errors, missing imports).
     2. **Cross-Boundary Layer Fixes**: Call `remember` if the fix involved interactions between 2+ layers (e.g., Caddy reverse-proxy + Phoenix SSE, Docker networking + Postgres).
@@ -64,7 +71,8 @@ Launch `mix mcp.server` through a shell that changes directory first:
     "MIX_ENV": "prod",
     "AI_API_KEY": "…",
     "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-    "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
+    "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db",
+    "PROJECT_ROOT": "/absolute/path/to/the/repo/you/are/editing"
   }
 }
 ```
@@ -84,7 +92,8 @@ Antigravity supports `cwd` natively:
     "MIX_ENV": "prod",
     "AI_API_KEY": "…",
     "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-    "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db"
+    "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db",
+    "PROJECT_ROOT": "/absolute/path/to/the/repo/you/are/editing"
   }
 }
 ```
@@ -99,6 +108,67 @@ Set in the `env` block of `.mcp.json` / `mcp_config.json`; they take effect on a
 | `EMBED_BATCH_SIZE` | `200` | Inputs per embeddings request. The provider rate-limits on *requests* per second, so a larger batch is the strongest lever against 429s. The ceiling is **tokens per request**, not input count — a 141-doc package has been rejected in a single batch — but that no longer needs tuning: a token-limit rejection is bisected automatically until the halves fit. |
 | `EMBED_CONCURRENCY` | `2` | Concurrent embedding requests. Bounded by the Finch pool (size 10) and the provider's rate limit — **not** by CPU count, since the work is IO-bound and a blocked process occupies no scheduler. |
 | `EMBED_PAUSE_MS` | `0` | Pause after each embedding request, for providers that limit *requests per second*. `0` means no pacing, which is what a capable endpoint wants. Raise it only if 429s persist after lowering concurrency. |
+
+### How `search_docs` retrieves
+
+Three stages, roughly 400ms end to end once the query embedding returns:
+
+1. **Two arms in parallel, shallow.** FTS5/BM25 top 15 and sqlite-vec cosine top
+   15, both scoped to the package before the cut.
+2. **Reciprocal rank fusion** to a pool of 10. This is a *union* — a document
+   either arm found can surface. Deeper arms measure worse, not better: RRF
+   rewards agreement, so 40-deep arms let mediocre-but-agreed rows displace a
+   strong single-arm hit.
+3. **Cross-encoder rerank** of those 10 (`AI_RERANK_MODEL`, default
+   `ms-marco-MiniLM-L-6-v2`, compiled at `sequence_length: 512`).
+
+Every stage degrades rather than fails: no embedding gives FTS-only, no reranker
+gives fused order, no keyword match gives vector-only.
+
+`mix docs.eval` measures all of it against a fixed 26-query set with ground truth
+resolved from the database. Run it before and after any change to chunking,
+tokenisation, fusion or reranking — `Notes.md` holds the control tables and the
+history of what moved them.
+
+### The index is single-model
+
+Every vector in `package_docs` must come from the same embedding model. Two
+models are never comparable: different dimensions make sqlite-vec raise (which
+`Docs.Search.run_query/4` rescues into a silent FTS-only search), and *identical*
+dimensions raise nothing at all while returning noise.
+
+`embedding_config` holds one row recording the model and dimension that built the
+index, written from the provider's actual response at the end of each ingest.
+
+- **Ingestion refuses** to write vectors from a different model than the recorded
+  one, before downloading anything — `{:error, {:embedding_model_mismatch, …}}`.
+- **Search disables the vector arm** on a mismatch and returns a `notices` entry
+  saying so, instead of raising into the rescue.
+- **`mix docs.reindex`** is the only supported way to change models: it clears the
+  record and re-embeds every indexed package. `--only pkg1,pkg2`, `--yes`,
+  `--keep-failed`. A package that fails is **dropped** rather than left stale, and
+  re-ingests on the next search that names it.
+
+Changing `AI_EMBED_MODEL` therefore always costs a full re-embed. That is a
+property of embeddings, not of this storage: a 1024-dim and a 1536-dim index are
+different vector spaces with no conversion between them.
+
+### Provider configuration is `AI_*`
+
+`AI_API_KEY`, `AI_API_URL`, `AI_EMBED_MODEL`, `AI_CHAT_MODEL_SMALL`,
+`AI_CHAT_MODEL_LARGE`. The endpoint is pluggable — Mistral, OpenAI, Gemini,
+Cohere. The legacy `MISTRAL_*` spellings **are not read**; if one is set without
+its `AI_*` counterpart, the server prints the replacement name to stderr and
+falls back to the default. A silent fallback to an unintended value is the same
+class of bug as the mixed-model index, so the legacy name gets a message and no
+effect.
+
+All of them are read in **one place**, `config/runtime.exs`, into the app env;
+`StdioMcp.AI.Client` reads only the app env. It used to read `System.get_env/1`
+first and fall back to the app env, which meant `runtime.exs` looked like the
+resolution point while actually being the second one — and the two disagreed, so
+setting `MISTRAL_MODEL_EMBED` on the command line was silently ignored by the
+client while appearing to work everywhere else.
 
 ### Applying code changes
 

@@ -6,6 +6,7 @@ defmodule StdioMcp.Docs.Search do
   alias StdioMcp.Docs.Fusion
   alias StdioMcp.Docs.HexPackage
   alias StdioMcp.Docs.IngestionJob
+  alias StdioMcp.Docs.Lockfile
   alias StdioMcp.Docs.RepairBudget
   alias StdioMcp.Docs.TarballIngestion
   alias StdioMcp.Docs.QuerySanitizer
@@ -34,7 +35,7 @@ defmodule StdioMcp.Docs.Search do
                        "`package` (e.g. package: \"phoenix\"), which also triggers " <>
                        "ingestion when it is not indexed yet."
 
-  @spec search(String.t(), keyword()) :: {[%StdioMcp.PackageDoc{}], notices()}
+  @spec search(String.t(), keyword()) :: {[PackageDoc.t()], notices()}
   def search(query, opts \\ []) when is_binary(query) do
     case opts |> Keyword.get(:package) |> presence() do
       nil -> {[], [@no_package_notice]}
@@ -42,7 +43,7 @@ defmodule StdioMcp.Docs.Search do
     end
   end
 
-  @spec search_package(String.t(), String.t(), keyword()) :: {[%StdioMcp.PackageDoc{}], notices()}
+  @spec search_package(String.t(), String.t(), keyword()) :: {[PackageDoc.t()], notices()}
   defp search_package(query, package, opts) do
     # Normalised once, here, so `version` has a single meaning everywhere below.
     # Previously `nil` meant "latest" on the ingestion branch and "apply no
@@ -137,7 +138,7 @@ defmodule StdioMcp.Docs.Search do
   @rerank_depth 10
 
   @spec run_query(Ecto.Query.t(), String.t(), list() | String.t() | nil, pos_integer()) ::
-          {[%StdioMcp.PackageDoc{}], notices()}
+          {[PackageDoc.t()], notices()}
   defp run_query(base_query, query, vec, limit) when is_list(vec) or is_binary(vec) do
     vec_param = if is_list(vec), do: Jason.encode!(vec), else: vec
     match = QuerySanitizer.to_match(query)
@@ -274,14 +275,57 @@ defmodule StdioMcp.Docs.Search do
     end
   end
 
-  # "latest" with something already stored. The version this project actually
-  # runs wins when the package is one of our dependencies — that is the version
-  # the caller's code executes against, and it costs no request to learn.
+  # "latest" with something already stored.
+  #
+  # The lockfile outranks everything because it is an explicit statement about
+  # *this* project, and unlike the two fallbacks it can legitimately point
+  # backwards: a project on `boruta 2.3.0` must get 2.3.0 docs even though
+  # 3.0.0-beta.4 is newer. Refusing to "downgrade" would serve it the wrong
+  # documentation silently, which is worse than the re-ingest it costs.
+  #
+  # `app_version` keeps its old behaviour — report drift, never switch — because
+  # it is an accident of where the server was launched rather than a statement
+  # about the caller.
   defp decide(package, "latest", stored) do
+    case Lockfile.version(package) do
+      nil -> decide_unpinned(package, stored)
+      ^stored -> serve_or_repair(package, stored, nil)
+      pinned -> switch_to_locked(package, stored, pinned)
+    end
+  end
+
+  defp decide_unpinned(package, stored) do
     case app_version(package) do
       ^stored -> serve_or_repair(package, stored, nil)
       _other -> compare_with_hex(package, stored)
     end
+  end
+
+  # One version per package is the invariant, so honouring a second project's
+  # lockfile evicts the first project's docs. A single switch is legitimate — you
+  # changed projects. Switching *repeatedly* means two projects share one
+  # DATABASE_PATH and will re-download and re-embed on every alternation, which
+  # no amount of searching fixes. The notice names that, because the symptom
+  # otherwise reads as "the tool is slow".
+  defp switch_to_locked(package, stored, pinned) do
+    Logger.info("[Docs.Search] #{package}: #{stored} -> #{pinned} (pinned by #{Lockfile.path()})")
+
+    case resolve_target(package, pinned) do
+      {:ok, target, docs_url} ->
+        {notices, resolved} = ingest(package, target, docs_url)
+
+        {[locked_switch_notice(package, stored, pinned) | notices], resolved}
+
+      {:error, notices} ->
+        {notices, nil}
+    end
+  end
+
+  defp locked_switch_notice(package, stored, pinned) do
+    "Replaced indexed '#{package}' v#{stored} with v#{pinned}, which #{Lockfile.path()} " <>
+      "pins. Only one version per package is kept. If two projects share this " <>
+      "DATABASE_PATH they will evict each other and re-embed on every switch — give " <>
+      "each project its own DATABASE_PATH and PROJECT_ROOT."
   end
 
   # A stored version that differs from the current release is reported, not
@@ -343,8 +387,11 @@ defmodule StdioMcp.Docs.Search do
     end
   end
 
+  # Precedence: what the caller's project locks, then what this server happens to
+  # run, then what Hex calls stable. Only the first is a statement about the repo
+  # being edited.
   defp target_from(meta, package, "latest") do
-    case app_version(package) || HexPackage.latest(meta) do
+    case Lockfile.version(package) || app_version(package) || HexPackage.latest(meta) do
       nil -> {:error, ["Hex lists no releases for '#{package}'."]}
       target -> {:ok, target, meta.docs_url}
     end

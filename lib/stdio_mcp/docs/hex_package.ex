@@ -23,10 +23,11 @@ defmodule StdioMcp.Docs.HexPackage do
           latest_stable: String.t() | nil,
           latest: String.t() | nil,
           versions: [String.t()],
-          docs_url: String.t() | nil
+          docs_url: String.t() | nil,
+          github_url: String.t() | nil
         }
 
-  defstruct [:name, :latest_stable, :latest, :docs_url, versions: []]
+  defstruct [:name, :latest_stable, :latest, :docs_url, :github_url, versions: []]
 
   @doc """
   Fetches metadata for `package`.
@@ -78,9 +79,35 @@ defmodule StdioMcp.Docs.HexPackage do
       latest_stable: body["latest_stable_version"],
       latest: body["latest_version"],
       docs_url: body["docs_html_url"],
+      github_url: github_url(body),
       versions:
         body |> Map.get("releases", []) |> Enum.map(& &1["version"]) |> Enum.reject(&is_nil/1)
     }
+  end
+
+  # Free: `meta.links` rides along on the call `fetch/1` already makes for version
+  # resolution, so this costs no extra request.
+  #
+  # Scanned case-insensitively by *value* rather than looked up by key, because
+  # the key is not stable — phoenix publishes `"github"`, everyone else checked
+  # publishes `"GitHub"`. And the repository is not derivable from the package
+  # name, which is the whole reason this is worth carrying:
+  #
+  #     boruta        -> malach-it/boruta_auth
+  #     anubis_mcp    -> zoedsoupe/anubis-mcp        (different org, hyphenated)
+  #     text_chunker  -> revelrylabs/text_chunker_ex
+  #     req           -> wojtekmach/req              (a personal account, no org)
+  #
+  # `search_github_issues` currently requires `org:`, which is precisely the
+  # argument a caller cannot guess.
+  defp github_url(body) do
+    body
+    |> get_in(["meta", "links"])
+    |> Kernel.||(%{})
+    |> Enum.find_value(fn {_key, value} ->
+      if is_binary(value) and String.contains?(String.downcase(value), "github.com"),
+        do: String.trim_trailing(value, "/")
+    end)
   end
 
   defp api_url do

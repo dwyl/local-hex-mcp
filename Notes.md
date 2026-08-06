@@ -1031,6 +1031,93 @@ source_url in docs  -> exact file + line + version tag
 github repo link    -> the agent's own tools take over        (still to build)
 ```
 
+## Step 11 — `PROJECT_ROOT` and the version rules (2026-08-06)
+
+The server runs from its own directory, so `:application.get_key/2` reports
+*its* dependencies and never the repo being edited. That is why `CLAUDE.md`
+carried fifteen lines telling the caller to read `mix.lock` and pass `version`
+on every call — a per-call discipline that depends on the model remembering.
+
+Three designs were considered. A `SessionStart` hook injecting the versions
+(~750 bytes for 49 deps, but correctness rests on the model using them every
+call). An `init` tool pushing the lockfile into session assigns (verified
+possible — `Scheduler` writes a tool's returned frame back into session state at
+`scheduler.ex:225` — but still needs the model to call it). And simply naming the
+path in the server's own `env`, which needs no protocol, no context and no
+discipline at all.
+
+The third won. `StdioMcp.Docs.Lockfile` reads `$PROJECT_ROOT/mix.lock` **on every
+lookup, never cached**: caching at boot would be marginally faster and wrong,
+since `mix deps.get` mid-session would leave the server answering with versions
+the project no longer uses. Parsed by regex rather than `Code.eval_string/1` —
+nothing here needs to execute a file to read two fields out of it.
+
+### The version rules, finally written down
+
+The confusion was real and had a cause: `PLAN.md` holds **two** policies, for two
+different products, and they had merged in memory.
+
+> | | local_hex | the service |
+> | scope | whatever your lockfile pins, **any age** | latest stable + pre-releases ahead |
+
+"Do not accept below latest-stable" is the *service's* rule — it exists so a small
+VPS does not become a Hex mirror. Locally the requirement is the opposite. So
+with a lockfile there is **no version policy to decide**: it is authoritative,
+pre-release or not, ancient or not. The RC-versus-stable question only arises
+when nothing pins the package.
+
+```
+explicit version:            -> that version
+$PROJECT_ROOT/mix.lock       -> the locked version, any age, pre-release included
+the server's own BEAM        -> that version   (report drift, never switch)
+nothing pins it              -> Hex latest stable (report drift, never switch)
+```
+
+`app_version` keeps its old report-don't-switch behaviour deliberately: it is an
+accident of where the server was launched, not a statement about the caller. The
+lockfile *does* switch, because it is such a statement.
+
+**"Never downgrade" was rejected.** If a project genuinely runs `boruta 2.3.0`,
+refusing to move back from `3.0.0-beta.4` serves it documentation for code it
+does not run — silently. Wrong answers beat slow answers only when you know they
+are wrong.
+
+### The two-project problem is not a version problem
+
+One version per package is the invariant, so honouring a second project's
+lockfile evicts the first project's docs. A single switch is legitimate. Repeated
+switching means two projects share one `DATABASE_PATH` and will re-download and
+re-embed on every alternation — which no version policy fixes, because it is a
+configuration problem. The switch now emits a notice naming that, since the
+symptom otherwise reads as "the tool is slow".
+
+Multi-version storage is deliberately still the *service's* problem
+(`PLAN.md` B3: "`save/3` prunes by package + version, not by package as here").
+
+Verified in the unit sense: no `PROJECT_ROOT` degrades to the previous
+behaviour; a bad path logs and degrades rather than raising; an edit to
+`mix.lock` is picked up on the next lookup without a restart.
+
+Verified live, round-trip, through the real MCP server — the switch path is the
+one that *evicts* data, so it was worth spending two ingests of a 54-document
+package rather than reasoning about it:
+
+```
+PROJECT_ROOT -> test_lock/mix.lock pinning 1.1.0
+  "Replaced indexed 'nimble_options' v1.1.1 with v1.1.0, which …/test_lock/mix.lock pins…"
+  54 docs · every result version 1.1.0 · source_url blob/v1.1.0/…
+
+PROJECT_ROOT -> the repo, whose mix.lock pins 1.1.1
+  "Replaced indexed 'nimble_options' v1.1.0 with v1.1.1, which …/mix.lock pins…"
+  53 docs · every result version 1.1.1 · source_url blob/v1.1.1/…
+```
+
+The differing document counts (54 against 53) are the useful detail: the two
+ingests really did fetch different tarballs. `source_url` tracked the version in
+both directions, which it must — a link pointing at a different version than the
+documentation beside it would be a quiet correctness bug. One version present
+throughout, `embedding_config` untouched.
+
 ### Repeated mistake worth naming
 
 `Reranker.rerank/2` was first written query-first and piped as

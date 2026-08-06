@@ -13,7 +13,32 @@ defmodule StdioMcp.Memory do
   require Logger
 
   # Below this, neighbours are not close enough to be worth a curator call.
-  @similarity_threshold 0.7
+  # Above this, a submission goes to the LLM to decide create/append/merge/replace;
+  # below it, `decide/2` creates directly and marks the entry `curated: false`.
+  #
+  # Was 0.7, which is not a meaningful "these might be the same" line for
+  # mistral-embed on prose. Measured over 91 pairs of *known-distinct* entries:
+  # median 0.738, max 0.943, and 73% cleared 0.70 — so the gate fired on three
+  # quarters of all pairs, none of them duplicates, and every submission reached
+  # the large model. The top pair scored 0.943 for two entries deliberately
+  # written about different bugs; cosine on prose measures topic, and a base that
+  # is all "Elixir debugging findings" is one topic.
+  #
+  #   threshold   non-duplicate pairs clearing it
+  #     0.70        73%
+  #     0.80        19%
+  #     0.90         2%
+  #
+  # 0.80 rather than 0.90 because the two errors are not symmetric: a threshold
+  # too low costs one model call and the LLM then correctly answers "create",
+  # while a threshold too high means a real duplicate never reaches the LLM and
+  # is stored forever. Cheap and self-correcting beats permanent.
+  #
+  # Calibrated against 14 entries in one topic. Re-measure as the base
+  # diversifies — and note a themed batch is self-similar by construction, since
+  # `remember` curates sequentially and later entries see earlier ones already
+  # stored.
+  @similarity_threshold 0.8
   # Above this, a submission adding no new facts is a duplicate.
   @duplicate_threshold 0.9
 
@@ -33,29 +58,39 @@ defmodule StdioMcp.Memory do
 
   def search(query_text, opts \\ []) when is_binary(query_text) do
     limit = Keyword.get(opts, :limit, 5)
-    kind = Keyword.get(opts, :kind)
-    package = Keyword.get(opts, :package)
-
-    base_query = from(k in Knowledge, where: k.outdated == false)
 
     base_query =
-      if kind && kind != "" do
-        from(k in base_query, where: k.kind == ^kind)
-      else
-        base_query
-      end
-
-    base_query =
-      if package && package != "" do
-        from(k in base_query,
-          where: fragment("json_extract(?, '$.package') = ?", k.metadata, ^package)
-        )
-      else
-        base_query
-      end
+      from(k in Knowledge, where: k.outdated == false)
+      |> scope_kind(opts |> Keyword.get(:kind) |> presence())
+      |> scope_package(opts |> Keyword.get(:package) |> presence())
 
     run_fts_knowledge(base_query, query_text, limit)
   end
+
+  # Each filter is "apply it or don't", which is two function heads rather than
+  # an `if` that has to name the untouched query in its else branch. Rebinding
+  # `base_query` three times also made the order look significant when it is not.
+  defp scope_kind(query, nil), do: query
+  defp scope_kind(query, kind), do: from(k in query, where: k.kind == ^kind)
+
+  defp scope_package(query, nil), do: query
+
+  defp scope_package(query, package) do
+    from(k in query, where: fragment("json_extract(?, '$.package') = ?", k.metadata, ^package))
+  end
+
+  # Blank and non-binary both collapse to nil, so the scopes above test presence
+  # with a plain nil match instead of repeating `x && x != ""`. Same helper as
+  # `StdioMcp.Docs.Search` — five lines duplicated in preference to a utility
+  # module that would attract everything else with nowhere else to live.
+  defp presence(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp presence(_value), do: nil
 
   @spec process_remember(binary(), any()) :: :ok | {:error, :memory_disabled}
   def process_remember(text, request_id \\ nil) do
@@ -246,8 +281,6 @@ defmodule StdioMcp.Memory do
     |> Repo.all()
     |> Enum.map(fn {entry, distance} -> Map.put(entry, :distance, distance) end)
   end
-
-  defp search_by_vector(_embedding, _opts), do: []
 
   # -- LLM Curation Pipeline (decide / ask_mistral / structure_text) --
 

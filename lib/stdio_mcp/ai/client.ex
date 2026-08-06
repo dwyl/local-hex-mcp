@@ -30,8 +30,22 @@ defmodule StdioMcp.AI.Client do
     is_binary(key) and key != "" and is_binary(small_model()) and small_model() != ""
   end
 
-  @spec embed(binary()) ::
-          {:error, :missing_api_key} | {:ok, any()}
+  @typedoc """
+  Every failure the provider calls can produce.
+
+  Worth spelling out rather than leaving as `any()`: `{429, _}` carries the
+  server's own `Retry-After` so a caller can wait exactly as long as it is told
+  instead of guessing, and `{400, _}` is how a token-limit rejection arrives,
+  which `TarballIngestion` bisects on rather than failing. A caller that cannot
+  see those in the spec will not handle them.
+  """
+  @type error ::
+          :missing_api_key
+          | {429, retry_after_ms :: non_neg_integer() | nil}
+          | {status :: 100..599, detail :: term()}
+          | Exception.t()
+
+  @spec embed(binary()) :: {:ok, [float()]} | {:error, error()}
   def embed(text) when is_binary(text) do
     case embed_batch([text]) do
       {:ok, [vector]} -> {:ok, vector}
@@ -39,8 +53,7 @@ defmodule StdioMcp.AI.Client do
     end
   end
 
-  @spec embed_batch(maybe_improper_list()) ::
-          {:error, any()} | {:ok, list()}
+  @spec embed_batch([binary()]) :: {:ok, [[float()]]} | {:error, error()}
   def embed_batch(texts) when is_list(texts) do
     key = api_key()
 
@@ -102,8 +115,7 @@ defmodule StdioMcp.AI.Client do
     end
   end
 
-  @spec chat(any()) ::
-          {:error, :missing_api_key} | {:ok, binary()}
+  @spec chat([map()], list(), keyword()) :: {:ok, map()} | {:error, error()}
   def chat(messages, _tools \\ [], opts \\ []) do
     key = api_key()
 

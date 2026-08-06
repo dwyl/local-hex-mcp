@@ -131,6 +131,60 @@ defmodule StdioMcp.Docs.SectionChunker do
 
   defp parse(markdown), do: MDEx.parse_document!(markdown, @parse_opts)
 
+  @doc """
+  Every heading in `markdown`, as `{level, text, code_text, first_line, last_line}`.
+
+  The raw heading split, before any of the size logic below — merging undersized
+  sections and splitting oversized ones would destroy the correspondence between
+  a heading and its anchor, which is what
+  `StdioMcp.Docs.TarballIngestion.markdown_section/2` needs.
+
+  `text` and `code_text` are separated deliberately. ExDoc writes two kinds of
+  heading and they anchor differently:
+
+      prose section   "## Provided options"   ->  "module-provided-options"
+      member heading  "# `bind_value`"        ->  "t:bind_value/0"
+
+  Read off the AST the difference is structural — a member heading is a
+  `%MDEx.Code{}` span with no prose beside it — where from the raw source it can
+  only be guessed at, and guessing failed: slugifying strips underscores as
+  emphasis markers, turning `bind_value` into `bindvalue`.
+
+  `last_line` runs to the line before the next heading of any level, or to the
+  end of the document.
+  """
+  @spec headings(String.t()) :: [
+          {pos_integer(), String.t(), String.t(), pos_integer(), pos_integer()}
+        ]
+  def headings(markdown) when is_binary(markdown) do
+    total = markdown |> String.split("\n") |> length()
+
+    found =
+      markdown
+      |> parse()
+      |> Map.fetch!(:nodes)
+      |> Enum.filter(&match?(%MDEx.Heading{}, &1))
+      |> Enum.map(fn %MDEx.Heading{level: level} = node ->
+        {start_line, _} = node.sourcepos.start
+        {level, literals(node, MDEx.Text), literals(node, MDEx.Code), start_line}
+      end)
+
+    starts = Enum.map(found, fn {_l, _t, _c, line} -> line end) ++ [total + 1]
+
+    found
+    |> Enum.zip(tl(starts))
+    |> Enum.map(fn {{level, text, code, from}, next} -> {level, text, code, from, next - 1} end)
+  rescue
+    _ -> []
+  end
+
+  defp literals(node, struct) do
+    node
+    |> Enum.filter(&(is_struct(&1) and &1.__struct__ == struct))
+    |> Enum.map_join(& &1.literal)
+    |> String.trim()
+  end
+
   # -- 1. Heading boundaries ---------------------------------------------------
 
   # The heading node stays in the section's own body. Dropping it would remove

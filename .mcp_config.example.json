@@ -9,7 +9,12 @@
         "MIX_QUIET": "1",
         "AI_API_KEY": "your-mistral-api-key",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "DATABASE_PATH": "your-path"
+        "MCP_LOG_FILE": "/absolute/path/to/local_hex_mcp/tmp_logs.txt",
+        "MCP_LOG_LEVEL": "warning",
+        "DATABASE_PATH": "your-path",
+        "EMBED_BATCH_SIZE": "50",
+        "EMBED_PAUSE_MS": "500",
+        "PROJECT_ROOT": "/Users/nevendrean/code/local_hex_mcp"
       }
     }
   }

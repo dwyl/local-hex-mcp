@@ -12,7 +12,10 @@
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
         "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db",
         "MCP_LOG_FILE": "/absolute/path/to/local_hex_mcp/tmp_logs.txt",
-        "MCP_LOG_LEVEL": "warning"
+        "MCP_LOG_LEVEL": "warning",
+        "EMBED_BATCH_SIZE": "50",
+        "EMBED_PAUSE_MS": "500",
+        "PROJECT_ROOT": "/Users/nevendrean/code/local_hex_mcp"
       }
     }
   }
