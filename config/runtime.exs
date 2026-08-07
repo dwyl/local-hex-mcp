@@ -28,10 +28,30 @@ for {legacy, canonical} <- [
   IO.puts(:stderr, "[config] #{legacy} is no longer read — rename it to #{canonical}")
 end
 
+# One provider serving both endpoints is the common case, so `AI_API_URL` stays
+# the single knob and the two specific ones fall back to it. They exist because
+# the endpoints are not always the same service: a local embedding server
+# (`text-embeddings-inference`, llama.cpp, Ollama) speaks `/embeddings` and has
+# no `/chat/completions` at all, so pointing `AI_API_URL` at it would leave
+# `remember`'s curation calling a route that 404s — and `memory_enabled?/0` only
+# checks that a key and a model name are set, so it would attempt the call rather
+# than degrade.
+#
+# Bound to a local variable rather than read back with `Application.get_env/2`:
+# in a release this file runs as a config provider, where `config` writes to an
+# accumulator applied only after the whole file finishes, so reading it back
+# returns the compile-time value.
+api_url = System.get_env("AI_API_URL", "https://api.mistral.ai/v1")
+
 config :stdio_mcp,
-  ai_api_url: System.get_env("AI_API_URL", "https://api.mistral.ai/v1"),
+  ai_api_url: api_url,
+  ai_embed_url: System.get_env("AI_EMBED_URL", api_url),
+  ai_chat_url: System.get_env("AI_CHAT_URL", api_url),
   ai_api_key: System.get_env("AI_API_KEY"),
   ai_embed_model: System.get_env("AI_EMBED_MODEL", "mistral-embed"),
+  # No default, and nil means the cross-encoder is not loaded at all. See
+  # `StdioMcp.Application.reranker_children/0` for why off is the default.
+  ai_rerank_model: System.get_env("AI_RERANK_MODEL"),
   ai_chat_model_small: System.get_env("AI_CHAT_MODEL_SMALL", "mistral-small-latest"),
   ai_chat_model_large: System.get_env("AI_CHAT_MODEL_LARGE", "mistral-large-latest"),
   github_api_url: System.get_env("GITHUB_API_URL", "https://api.github.com"),

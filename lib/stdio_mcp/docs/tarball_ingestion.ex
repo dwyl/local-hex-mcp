@@ -320,7 +320,7 @@ defmodule StdioMcp.Docs.TarballIngestion do
           doc_type: type,
           module: module,
           function: function,
-          signature: signature(title, chunk.path, idx, multi?),
+          signature: signature(title, chunk, idx, multi?),
           content: chunk.text,
           code_snippet: first_code_block(chunk.text),
           hexdocs_url: url,
@@ -333,14 +333,29 @@ defmodule StdioMcp.Docs.TarballIngestion do
   # `signature` is displayed *and* fed to the embedding via `embed_text/1`, so
   # naming the chunk is worth more than numbering it: "connect/1 — Allowed
   # options" tells both a reader and the embedding model what the fragment is,
-  # where "connect/1 - Part 2" told neither. The ordinal stays only as the
-  # fallback for a document with no headings to borrow a name from, where it is
-  # at least honest about being one piece of several.
-  defp signature(title, _path, _idx, false), do: title
+  # where "connect/1 - Part 2" told neither.
+  #
+  # The ordinal was written as the fallback and turned out to be the rule — 12.4%
+  # of the first corpus against 2.1% for the heading trail — because the shape
+  # that needs splitting is a flat option list under one heading, where every
+  # slice inherits the same `path`. `Exqlite.Connection.connect/1` split into four
+  # parts named "Part 1".."Part 4", and the cross-encoder duly ranked the part
+  # holding `:journal_mode` sixth for a query about write-ahead logging: nothing
+  # in any of the four names said which one held what.
+  #
+  # So the order is identity, then context, then the ordinal — which now survives
+  # only for prose with neither, where it is at least honest about being one piece
+  # of several.
+  defp signature(title, _chunk, _idx, false), do: title
 
-  defp signature(title, [], idx, true), do: "#{title} - Part #{idx + 1}"
-
-  defp signature(title, path, _idx, true), do: "#{title} — #{Enum.join(path, " › ")}"
+  defp signature(title, %{path: path, terms: terms}, idx, true) do
+    case {path, terms} do
+      {[], []} -> "#{title} - Part #{idx + 1}"
+      {[], terms} -> "#{title} — #{Enum.join(terms, ", ")}"
+      {path, []} -> "#{title} — #{Enum.join(path, " › ")}"
+      {path, terms} -> "#{title} — #{Enum.join(path, " › ")}: #{Enum.join(terms, ", ")}"
+    end
+  end
 
   # Falls back to the page when `search_data` has no text for an item, which is
   # 7–36% of items depending on the package. Markdown is preferred where the

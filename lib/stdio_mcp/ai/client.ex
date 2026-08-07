@@ -14,6 +14,15 @@ defmodule StdioMcp.AI.Client do
   # app env. Still runtime, so a restart is all a new value needs.
   def api_url, do: Application.get_env(:stdio_mcp, :ai_api_url, "https://api.mistral.ai/v1")
 
+  # Embeddings and chat are addressed separately because they are not always the
+  # same service. `runtime.exs` defaults both to `AI_API_URL`, so a single
+  # provider needs no extra configuration; the `||` is for a config path that
+  # never ran `runtime.exs` (tests, a bare `config.exs`) rather than a second
+  # resolution point.
+  def embed_url, do: Application.get_env(:stdio_mcp, :ai_embed_url) || api_url()
+
+  def chat_url, do: Application.get_env(:stdio_mcp, :ai_chat_url) || api_url()
+
   def api_key, do: Application.get_env(:stdio_mcp, :ai_api_key)
 
   def small_model,
@@ -60,7 +69,7 @@ defmodule StdioMcp.AI.Client do
     if is_nil(key) or key == "" do
       {:error, :missing_api_key}
     else
-      base_url = String.trim_trailing(api_url(), "/")
+      base_url = String.trim_trailing(embed_url(), "/")
       url = "#{base_url}/embeddings"
       model = embed_model()
 
@@ -122,7 +131,7 @@ defmodule StdioMcp.AI.Client do
     if is_nil(key) or key == "" do
       {:error, :missing_api_key}
     else
-      base_url = String.trim_trailing(api_url(), "/")
+      base_url = String.trim_trailing(chat_url(), "/")
       url = "#{base_url}/chat/completions"
       model = Keyword.get(opts, :model, small_model())
 

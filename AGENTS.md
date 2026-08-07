@@ -19,7 +19,7 @@
 
     Without `PROJECT_ROOT`, the old rule applies and you must pass `version` yourself: omitting it hands resolution to the server, which sees only its own BEAM and then Hex latest stable, and answers about a different version without saying so.
 
-  - **One `DATABASE_PATH` and `PROJECT_ROOT` per project.** Only one version per package is kept, so two projects sharing a database evict each other and re-embed on every switch. The search reports this when it happens, but the fix is configuration, not retries.
+  - **`PROJECT_ROOT` is per project; the database usually is not.** Sharing one database across projects is the normal setup and needs no configuration — the path is compiled in. Only one version per package is kept, so the cost appears in exactly one situation: two projects pinning *different* versions of the *same* package, which re-ingests on each switch. The search reports it when it happens; the fix is a separate `DATABASE_PATH` for that project, not retries.
   - **When to pass `version` explicitly.** With `PROJECT_ROOT` set, essentially never — pass it only to read a version the project does *not* run (comparing against a newer release, checking what changed). Without it, pass it whenever the answer must match your lockfile.
     - For a package that is **not** a dependency — evaluating a library, reading someone else's docs — omit it either way. Nothing local pins it, so Hex latest stable is the right answer.
   - **One version per package.** Ingesting prunes every other version of that package. There is never a mix, and a search never interleaves versions.
@@ -38,7 +38,7 @@
   - The payload includes `database`, the SQLite file in use. `DATABASE_PATH` is per-server: pointing two projects at one file makes them overwrite each other's rows, since only one version per package is kept.
   - `check_hex: true` adds each package's latest stable release and a `drift` verdict (`current` / `behind` / `ahead of stable`). It costs **one HTTP request per indexed package**, so leave it off unless drift is the question.
 
-- **`recall`**: Search the local knowledge base for past pain points, architectural decisions, and bug fixes.
+- **`recall`**: Search the local knowledge base for past pain points, architectural decisions, and bug fixes. Hybrid retrieval — FTS5 and vector fused by RRF, the same shape as `search_docs` — so a question phrased in different words than the entry still finds it. Falls back to keyword-only when no embedding is available, and works with no API key at all.
   - **Execute BEFORE fixing**:
     1. **On Any Command/Test Failure**: Immediately run `recall(query: "<error message>", kind: "pain_point")`.
     2. **On Second Iteration**: If the first code edit fails to fix an error, run `recall` on the specific function/module before making a second edit.
@@ -111,21 +111,30 @@ Set in the `env` block of `.mcp.json` / `mcp_config.json`; they take effect on a
 
 ### How `search_docs` retrieves
 
-Three stages, roughly 400ms end to end once the query embedding returns:
+Two stages, roughly 30ms end to end once the query embedding returns:
 
 1. **Two arms in parallel, shallow.** FTS5/BM25 top 15 and sqlite-vec cosine top
    15, both scoped to the package before the cut.
-2. **Reciprocal rank fusion** to a pool of 10. This is a *union* — a document
-   either arm found can surface. Deeper arms measure worse, not better: RRF
-   rewards agreement, so 40-deep arms let mediocre-but-agreed rows displace a
-   strong single-arm hit.
-3. **Cross-encoder rerank** of those 10 (`AI_RERANK_MODEL`, default
-   `ms-marco-MiniLM-L-6-v2`, compiled at `sequence_length: 512`).
+2. **Reciprocal rank fusion** to a pool of 10, all of which is returned. This is
+   a *union* — a document either arm found can surface. Deeper arms measure
+   worse, not better: RRF rewards agreement, so 40-deep arms let
+   mediocre-but-agreed rows displace a strong single-arm hit.
+
+A third stage, **cross-encoder rerank** of those 10, exists but is **off unless
+`AI_RERANK_MODEL` is set** — no model is loaded otherwise. It never adds recall
+(candidate recall is already 1.00), and at a pool of 10 returned whole it cannot
+add or remove a document at all, only reorder one you will read in full either
+way. Enabling it costs ~265ms and buys ~0.05 MRR.
+
+**All ten rows come back, and the tail is unranked by any model.** Expect the
+last few to include changelog entries and loosely related functions — that is the
+accepted cost of not letting a small model expel a good row from the top five.
+Read the whole payload rather than trusting position.
 
 Every stage degrades rather than fails: no embedding gives FTS-only, no reranker
 gives fused order, no keyword match gives vector-only.
 
-`mix docs.eval` measures all of it against a fixed 26-query set with ground truth
+`mix docs.eval` measures all of it against a fixed 28-query set with ground truth
 resolved from the database. Run it before and after any change to chunking,
 tokenisation, fusion or reranking — `Notes.md` holds the control tables and the
 history of what moved them.
@@ -157,7 +166,12 @@ different vector spaces with no conversion between them.
 
 `AI_API_KEY`, `AI_API_URL`, `AI_EMBED_MODEL`, `AI_CHAT_MODEL_SMALL`,
 `AI_CHAT_MODEL_LARGE`. The endpoint is pluggable — Mistral, OpenAI, Gemini,
-Cohere. The legacy `MISTRAL_*` spellings **are not read**; if one is set without
+Cohere.
+
+`AI_EMBED_URL` and `AI_CHAT_URL` override `AI_API_URL` for one endpoint each,
+both defaulting to it. They exist because a local embedding server serves
+`/embeddings` and has no `/chat/completions`, so a single URL would leave
+`remember` calling a route that 404s. The legacy `MISTRAL_*` spellings **are not read**; if one is set without
 its `AI_*` counterpart, the server prints the replacement name to stderr and
 falls back to the default. A silent fallback to an unintended value is the same
 class of bug as the mixed-model index, so the legacy name gets a message and no

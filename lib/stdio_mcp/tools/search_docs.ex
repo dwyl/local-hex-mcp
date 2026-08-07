@@ -108,13 +108,20 @@ defmodule StdioMcp.Tools.SearchDocs do
       refresh: refresh,
       include_examples_only: examples_only,
       embedding: vector,
-      # 5, not 10. The pipeline reranks a pool of 10 and `recall@5` is what the
-      # eval optimises, so returning all 10 hands back the tail the cross-encoder
-      # has just finished demoting — measured live, the last two or three rows of
-      # every search were changelog entries and unrelated functions. Returning
-      # the reranked head costs nothing measurable and drops roughly a third of
-      # the payload.
-      limit: 5
+      # 10, and the fused pool is returned whole. Recall@5 is 0.96 against 1.00 at
+      # ten on the 28-query eval: cutting at five drops a document the retrieval
+      # arms did find, and no amount of reranking puts it back — a pool of ten is
+      # what `@rerank_depth` builds anyway, so five was throwing half of it away.
+      #
+      # This used to read "5, not 10", on the observation that the last two or
+      # three rows of every search were changelog entries and unrelated functions.
+      # That was true and is the cost being accepted here: with the cross-encoder
+      # off, ranks 6-10 are RRF's, and their quality is unmeasured. The consumer
+      # is an LLM that reads the whole payload before answering, so a mediocre
+      # extra row is cheap to ignore while a missing row cannot be recovered
+      # without a second round trip — which costs far more than the ~2k tokens
+      # the extra five rows add.
+      limit: 10
     ]
 
     {results, notices} = Search.search(query, opts)
@@ -142,7 +149,10 @@ defmodule StdioMcp.Tools.SearchDocs do
   rescue
     e ->
       require Logger
-      Logger.error("[SearchDocs] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
+
+      Logger.error(
+        "[SearchDocs] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}"
+      )
 
       {:reply, Response.text(Response.tool(), "Search docs failed: #{Exception.message(e)}"),
        frame}

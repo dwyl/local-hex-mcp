@@ -102,7 +102,10 @@ defmodule StdioMcp.Tools.GetTokenUsage do
   rescue
     e ->
       require Logger
-      Logger.error("[GetTokenUsage] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
+
+      Logger.error(
+        "[GetTokenUsage] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}"
+      )
 
       {:reply, Response.text(Response.tool(), "Get token usage failed: #{Exception.message(e)}"),
        frame}

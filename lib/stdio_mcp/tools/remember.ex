@@ -40,7 +40,10 @@ defmodule StdioMcp.Tools.Remember do
   rescue
     e ->
       require Logger
-      Logger.error("[Remember] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
+
+      Logger.error(
+        "[Remember] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}"
+      )
 
       {:reply, Response.text(Response.tool(), "Remember failed: #{Exception.message(e)}"), frame}
   end

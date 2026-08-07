@@ -62,7 +62,10 @@ defmodule StdioMcp.Tools.Recall do
   rescue
     e ->
       require Logger
-      Logger.error("[Recall] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
+
+      Logger.error(
+        "[Recall] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}"
+      )
 
       {:reply, Response.text(Response.tool(), "Recall failed: #{Exception.message(e)}"), frame}
   end

@@ -12,7 +12,7 @@ defmodule StdioMcp.Docs.Reranker do
   ## `sequence_length` is the whole game
 
   The serving is compiled at a fixed `sequence_length` (see
-  `StdioMcp.Application.serving_reranker/0`) and silently truncates the pair to
+  `StdioMcp.Application.serving_reranker/1`) and silently truncates the pair to
   it. At 128 tokens — roughly 400 characters — a symbol query still works,
   because the identifier is in the header prepended below, while a conceptual
   answer usually sits deeper in the chunk and is never seen. Measured on the
@@ -159,24 +159,42 @@ defmodule StdioMcp.Docs.Reranker do
   # A short header rather than the full breadcrumb used for embedding: at the
   # compiled sequence length every token spent naming the package is a token not
   # spent on the text being judged.
+  defp text(doc) do
+    body = doc.content |> to_string() |> String.slice(0, @max_chars)
+
+    case header(doc) do
+      "" -> body
+      header -> header <> "\n\n" <> body
+    end
+  end
+
+  # `signature`, not `module` + `function`. Those two are shared by every slice of
+  # one section, so a split `@doc` reached the cross-encoder as four pairs with
+  # the identical header "Exqlite.Connection.connect/1" and four different bodies
+  # — the one field that says *which* slice this is was the one field withheld.
+  # Measured: for "turn on write ahead logging", the slice documenting
+  # `:journal_mode` was ranked sixth, below one about `set_authorizer`, and no
+  # amount of model size fixed it because the discriminating text was never in
+  # the pair. `signature` is also what FTS indexes and what `embed_text/1`
+  # embeds, so this makes the reranker read the same name as the other two arms
+  # instead of a coarser one of its own.
+  defp header(doc) do
+    case to_string(doc.signature) do
+      "" -> qualified(doc)
+      signature -> signature
+    end
+  end
+
   # `function` is already module-qualified on modern ExDoc, so joining it to
   # `module` produced "Boruta.Oauth.Client.Boruta.Oauth.Client.public?/1" — the
   # module name twice, spending tokens at the compiled sequence length on nothing.
-  defp text(doc) do
-    header =
-      case {to_string(doc.module), to_string(doc.function)} do
-        {_module, ""} ->
-          to_string(doc.module)
+  defp qualified(doc) do
+    case {to_string(doc.module), to_string(doc.function)} do
+      {module, ""} ->
+        module
 
-        {module, function} ->
-          if String.starts_with?(function, module), do: function, else: module <> "." <> function
-      end
-
-    body = doc.content |> to_string() |> String.slice(0, @max_chars)
-
-    case header do
-      "" -> body
-      header -> header <> "\n\n" <> body
+      {module, function} ->
+        if String.starts_with?(function, module), do: function, else: module <> "." <> function
     end
   end
 

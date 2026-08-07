@@ -1,21 +1,22 @@
 {
+  "_comment": "Claude Code / Cursor. Copy to .mcp.json in the repo you want to USE the server from, then replace the two ALL-CAPS placeholders. MCP_CLONE is where you cloned local_hex_mcp; YOUR_PROJECT is the repo you are editing. DATABASE_PATH is deliberately absent: it defaults to <MCP_CLONE>/priv/mcp.db, which is also what 'mix setup' migrates, so one shared database needs no configuration at all. See README 'AI Code Assistant Configuration'.",
+
   "mcpServers": {
     "hex_local": {
       "command": "sh",
       "args": [
         "-c",
-        "cd /absolute/path/to/local_hex_mcp && exec /opt/homebrew/bin/mix mcp.server --no-compile"
+        "cd /ABSOLUTE/PATH/TO/<MCP_CLONE> && exec /opt/homebrew/bin/mix mcp.server --no-compile"
       ],
       "env": {
         "MIX_ENV": "prod",
-        "AI_API_KEY": "your-key-here",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db",
-        "MCP_LOG_FILE": "/absolute/path/to/local_hex_mcp/tmp_logs.txt",
-        "MCP_LOG_LEVEL": "warning",
-        "EMBED_BATCH_SIZE": "50",
-        "EMBED_PAUSE_MS": "500",
-        "PROJECT_ROOT": "/Users/nevendrean/code/local_hex_mcp"
+
+        "AI_API_KEY": "<YOUR-API-KEY>",
+        "PROJECT_ROOT": "/ABSOLUTE/PATH/TO/YOUR_PROJECT",
+
+        "MCP_LOG_FILE": "/ABSOLUTE/PATH/TO/<MCP_CLONE>/tmp_logs.txt",
+        "MCP_LOG_LEVEL": "warning"
       }
     }
   }

@@ -36,37 +36,37 @@ defmodule StdioMcp.Docs.Search do
                        "ingestion when it is not indexed yet."
 
   @search_schema NimbleOptions.new!(
-    package: [
-      type: {:or, [:string, :nil]},
-      default: nil,
-      doc: "Hex package name to search within."
-    ],
-    version: [
-      type: {:or, [:string, :nil]},
-      default: nil,
-      doc: "Optional package version or 'latest'."
-    ],
-    refresh: [
-      type: :boolean,
-      default: false,
-      doc: "Whether to force re-ingesting the package."
-    ],
-    include_examples_only: [
-      type: :boolean,
-      default: false,
-      doc: "Filter results to only entries containing code snippets."
-    ],
-    embedding: [
-      type: {:or, [:string, :nil]},
-      default: nil,
-      doc: "JSON-encoded float vector string or nil."
-    ],
-    limit: [
-      type: :pos_integer,
-      default: 10,
-      doc: "Maximum search results to return."
-    ]
-  )
+                   package: [
+                     type: {:or, [:string, nil]},
+                     default: nil,
+                     doc: "Hex package name to search within."
+                   ],
+                   version: [
+                     type: {:or, [:string, nil]},
+                     default: nil,
+                     doc: "Optional package version or 'latest'."
+                   ],
+                   refresh: [
+                     type: :boolean,
+                     default: false,
+                     doc: "Whether to force re-ingesting the package."
+                   ],
+                   include_examples_only: [
+                     type: :boolean,
+                     default: false,
+                     doc: "Filter results to only entries containing code snippets."
+                   ],
+                   embedding: [
+                     type: {:or, [:string, nil]},
+                     default: nil,
+                     doc: "JSON-encoded float vector string or nil."
+                   ],
+                   limit: [
+                     type: :pos_integer,
+                     default: 10,
+                     doc: "Maximum search results to return."
+                   ]
+                 )
 
   @spec search(String.t(), keyword()) :: {[PackageDoc.t()], notices()}
   def search(query, opts \\ []) when is_binary(query) do

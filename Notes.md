@@ -1,3 +1,424 @@
+# How search works — 2026-08-07
+
+Current as of the `signature`-aware reranker, content-named chunks and `limit: 10`.
+Everything below the **Archive** divider predates one or more of those and its
+numbers are not comparable to these.
+
+## Two arms, one fusion
+
+```
+query ─┬─ QuerySanitizer ──→ FTS5 / BM25    top 15 ┐
+       └─ embed (1024-dim) → sqlite-vec     top 15 ┴─→ RRF k=60 ─→ top 10 ─→ returned
+                                                            └─(optional)→ cross-encoder
+```
+
+Both arms join `base_query`, so package/version scoping applies *before* the depth
+cut — ranking the whole FTS table and filtering afterwards would spend the 15-item
+budget on other packages.
+
+```
+28 queries · corpus 11 packages / 3891 rows · top 10
+
+all           recall@10   MRR@10   cand    ms        concept (16)   symbol (12)
+fts               0.93      0.67   0.93     4        0.88 / 0.51    1.00 / 0.88
+vector            0.93      0.75   1.00    37        0.94 / 0.68    0.92 / 0.83
+hybrid            0.93      0.75   0.93    32        0.88 / 0.66    1.00 / 0.86
+rrf               1.00      0.75   1.00    28        1.00 / 0.63    1.00 / 0.92
+```
+
+Re-baselined 2026-08-07 after `anubis_mcp` went 1.14.0 -> 2.0.0 (1299 -> 1223
+docs, corpus 3967 -> 3891 rows). Recall did not move; MRR drifted 0.01-0.02, which
+is what a corpus change looks like — **BM25 is collection-global**, so re-indexing
+any package shifts the keyword ranking of queries in every other one. All 28
+queries still resolved their expectations across a major version, which is the
+check that matters: a silently broken expectation shows up as a lower query count,
+not as a worse score.
+
+**The fusion is where the retrieval quality is.** It is a *union*, not an
+intersection: a document only one arm found can still surface, and the arms fail
+differently — FTS misses conceptual phrasing, the bi-encoder misses exact
+identifiers. Union takes recall@10 from 0.93 to 1.00. `hybrid` is the intersection
+this replaced, kept as the control.
+
+**Deeper arms measure worse.** RRF scores consensus: an item ranked ~15 by both
+arms contributes `1/75 + 1/75` and outscores one ranked 3 by a single arm at
+`1/63`. At 40-deep there are enough mediocre-but-agreed items to push a strong
+single-arm hit out of the fused ten. 15 is the setting; 40 was worse.
+
+**`k` does not matter.** Swept 0, 5, 10, 20, 60 — identical to two decimals on
+every bucket. Over ten items, ordering by `Σ 1/(k+rᵢ)` approximates rank-sum at
+large `k` and weights the head at `k=0`, and those disagree only when an item is
+extreme on one list and middling on the other. Recorded as a null so nobody
+re-runs it.
+
+## Chunks are named by what is in them
+
+`signature` is displayed, indexed by FTS, embedded by `embed_text/1`, and read by
+the reranker. For a section too large to keep whole it is the *only* field that
+differs between slices — `module`, `function` and `hexdocs_url` are shared, and
+correctly so, since the slices really do live at one anchor.
+
+Naming them by ordinal defeats that. `Exqlite.Connection.connect/1` splits into
+four parts, and as "Part 1".."Part 4" nothing said which held `:journal_mode`; the
+cross-encoder ranked it sixth for a query about write-ahead logging. Now:
+
+```
+Exqlite.Connection.connect/1 — :database, :default_transaction_mode, :mode, :journal_mode
+Exqlite.Connection.connect/1 — :foreign_keys, :cache_size, :cache_spill, …
+```
+
+read off the leading inline-code span of each top-level list item. Priority is
+**identity, then context, then ordinal**: terms if the chunk has any, else the
+heading trail, else `- Part N`. Byte-split pieces re-derive their own terms rather
+than inheriting the parent's — copying them down was assumed to affect only the
+rare oversized-code-block case and in fact produced three chunks of
+`Ecto.Adapters.SQLite3`'s option list all named `— :database`.
+
+430 rows (10.8%) still carry a bare ordinal. They are prose splits — `mix
+phx.gen.html - Part 1/2` — with no leading code span to harvest. Their opening
+sentences would name them; unimplemented.
+
+## The reranker is optional, and off
+
+It **never adds recall**. Candidate recall after fusion is already 1.00, so the
+stage only reorders a pool that already holds the answer — and with `limit 10`
+against a rerank depth of 10, it reorders exactly the set that is returned. It
+cannot add or remove a document.
+
+That matters because of who reads the output: an LLM that reads every row before
+replying. It ranks the payload itself, so rank *within* the payload is close to
+worthless, while a document that never arrives cannot be recovered without a
+second round trip — which costs far more than the ~2k tokens the extra five rows
+add. Measured on the final code:
+
+```
+                      recall@10   MRR@10   concept MRR   symbol MRR      ms
+no reranker              1.00      0.76       0.65          0.92         41
+MiniLM-L4-v2             1.00      0.81       0.67          1.00        291
+bge-reranker-base        1.00      0.82       0.68          1.00       1952
+```
+
+Measured on the 3967-row corpus, before the `anubis_mcp` 2.0.0 bump. The three are
+internally comparable — same corpus, one variable — but not directly against the
+table above; on 3891 rows the no-reranker row reads 1.00 / 0.75 / 0.63 / 0.92.
+
+Recall is identical by construction, not by luck. What reranking buys is **symbol
+MRR, 0.92 → 1.00** — twelve identifier queries all landing at rank 1 — and +0.02
+on concepts.
+
+**Default: off.** `AI_RERANK_MODEL` unset means no model is loaded at all, which
+also removes a HuggingFace download and an EXLA compile from
+`Application.start/2` — they happened inside the window an MCP client waits for
+the server to come up, so a cold machine's first connection could time out and
+look broken.
+
+**If you want one: `MiniLM-L4-v2`.** +0.05 MRR for +250ms. Worth it only if
+something downstream reads position rather than the page.
+
+**Not bge.** It buys +0.01 MRR over L4 — a sixth of a rank — for another 1661ms.
+Its one real edge was strictness: on `"Building a Server"` it was the only model
+that pushed the sibling `building-a-client` guide out of the top five entirely,
+monotone in capacity (L2 rank 2, L4 2, L6 3, L12 4, bge absent). Returning ten
+makes that moot — the document is in the payload either way. **The `limit 10`
+decision is what removed the argument for capacity.** If a token-constrained
+client ever cuts to top-3, strictness matters again and this reopens.
+
+### Model names
+
+HuggingFace renamed these: **no dash before the layer count, lowercase `v`.**
+Checked against the API on 2026-08-07 — `200` is canonical, `307` redirects (works,
+but is not the real name), `401` does not exist:
+
+```
+cross-encoder/ms-marco-MiniLM-L4-v2      200   canonical
+cross-encoder/ms-marco-MiniLM-L6-v2      200
+cross-encoder/ms-marco-MiniLM-L12-v2     200
+cross-encoder/ms-marco-TinyBERT-L2-v2    200
+cross-encoder/ms-marco-TinyBERT-L4       200
+BAAI/bge-reranker-base                   200
+
+cross-encoder/ms-marco-MiniLM-L-6-v2     307   old dashed form, redirects
+cross-encoder/ms-marco-MiniLM-L4-V2      307   ids are case-insensitive
+cross-encoder/ms-marco-TinyBERT-L-4-v2   401   does not exist in either scheme
+```
+
+The last one circulates in model lists and is the realistic way to get this wrong:
+the `-v2` suffix belongs to the L2 line, not L4. It used to abort application
+startup — `{:ok, _} = Bumblebee.load_model/1` raised inside `start/2`, so a typo
+in an env var meant an MCP server that would not come up, with the reason on a
+stderr stream the client discards. It now logs at `error` (the configured level;
+a warning would have been dropped) and starts without reranking.
+
+`TinyBERT-L2-v2` is the one to reject among the small models: it loses a query L4
+keeps. `TinyBERT-L6` is worse — 0.90 symbol MRR, the only model that fails the
+case every other one gets perfect, and slower than MiniLM-L6.
+
+**When enabled, the strategy is `fused`**: RRF of the retrieval order with the
+reranked one, so the model can move a document but not overrule retrieval. Kept on
+the mechanistic argument — a bi-encoder and a cross-encoder fail differently — and
+explicitly **not** on the measurement, which is one query wide. See the audit in
+the archive.
+
+## Cost of the tail
+
+All ten rows come back and nothing ranks the last five. Expect changelog entries
+and loosely-related functions there: a live exqlite search returned three
+changelog rows at 4, 6 and 8. That is the accepted cost of not letting a small
+model expel a good row, and it is also three wasted slots — down-weighting
+changelog `doc_type` is the cheapest unclaimed win.
+
+## The embedding model is the index
+
+Every vector in `package_docs` — and in `knowledge` — must come from one model.
+Two models are never comparable, and the failure has two shapes of which the
+quiet one is worse: different dimensions make sqlite-vec raise, while *identical*
+dimensions raise nothing at all and return noise. `mistral-embed` and
+Qwen3-Embedding-0.6B are both 1024-dim, so that second case is not hypothetical.
+
+`embedding_config` holds one row naming the model and dimension that built the
+index. Ingestion refuses a mismatch before downloading anything; `Docs.Search`
+disables the vector arm and says so in `notices`; `Memory` skips neighbour search
+in `remember` rather than deduplicating on meaningless distances.
+`mix docs.reindex` is the only supported way to change models.
+
+### Two ways a partial reindex used to defeat that
+
+Both found on 2026-08-07 by nearly doing them.
+
+**Interruption.** `reindex/3` clears the record, then re-embeds package by package,
+and the first success writes the new record. Ctrl-C after package three left
+packages 1-3 on the new model, 4-11 on the old one, and the record naming the new
+one — so the guard passed and searches against the untouched packages returned
+noise. A *failed* package was already handled by dropping its rows; an
+interrupted *process* never reaches that code. Every target's rows are now
+deleted up front, so an interruption leaves them **absent** rather than stale,
+and absent is safe: `Docs.Search` re-ingests on the next search that names them.
+The cost is that a wholly failed run empties the index instead of leaving it
+usable, which is what `--keep-failed` is for.
+
+**`--only` with a changed model.** Same end state through a different door: the
+named packages move, the rest do not, and the global record follows the named
+ones. Now refused outright — `--only` is for re-embedding a package that failed,
+under the model already in force. Changing models is all-or-nothing.
+
+### The knowledge base was outside the guard
+
+`knowledge` is a second vector space in the same database, embedded by the same
+`Client.embed/1` and compared with the same `vec_distance_cosine`, covered by the
+same single `embedding_config` row — and `mix docs.reindex` never touched it. So
+switching `AI_EMBED_MODEL` moved `package_docs` and left `knowledge` behind.
+
+`Memory.search/2` is FTS-only and was unaffected, which is worth stating because
+the first diagnosis said otherwise. The exposure was `process_remember/2`, which
+finds neighbours by cosine and applies `@similarity_threshold` to them: with a
+mixed index, deduplication decides on noise. Reindex now re-embeds knowledge in
+one batch (tens of rows against a package's thousands), and `search_by_vector/2`
+consults `EmbeddingConfig` first, returning no neighbours on a mismatch. No
+neighbours means `decide/2` creates a new entry — a possible duplicate, which a
+later pass can merge, rather than a merge into the wrong entry, which nothing
+recovers.
+
+## Local embeddings: fast, and unusable (2026-08-07)
+
+The motivation was real: changing `AI_EMBED_MODEL` costs a full re-embed, which
+is billable, so the embedder had never been swept the way rerankers were. A local
+endpoint makes that free. `AI_EMBED_URL` and `AI_CHAT_URL` were split out of
+`AI_API_URL` for it — an embedding server has no `/chat/completions`, and a single
+URL left `remember` calling a route that 404s.
+
+Two servers, same model family, on the same machine:
+
+| | throughput | full reindex | single query |
+| --- | --- | --- | --- |
+| TEI 1.9.3, candle/Metal, f16 | 244 tok/s | 25-30 min | 48ms |
+| MLX, Qwen3-Embedding-0.6B-4bit-DWQ | 2,400 tok/s | ~5 min | 27ms |
+| mistral-embed (hosted) | — | ~3 min | network round trip |
+
+MLX is 10x candle here and beats the network on query latency. The performance
+case was won outright.
+
+**And the retrieval collapsed.**
+
+```
+                mistral-embed    Qwen3-0.6B-4bit
+vector recall       0.93              0.43
+candidate recall    1.00              0.46
+symbol vector       0.92              0.33
+rrf (saved by FTS)  1.00              0.96
+```
+
+`cand 0.46` means the answer was not in the pool at all, half the time. Direct
+measurement of why, none of which found the cause:
+
+```
+query <-> the document that answers it    cos 0.089
+query <-> a distractor                    cos 0.033
+two unrelated sentences                   cos 0.211
+```
+
+A relevant pair scoring below two unrelated sentences is not a weaker embedder,
+it is a space that does not hold the relation. Three hypotheses died: padding with
+`last_token` pooling (embeddings are batch-invariant, `cos 1.0000` alone vs
+batched), the instruction prefix Qwen3's card specifies for queries (it made the
+ranking *worse*, flipping the correct document below the distractor), and, earlier,
+CPU-instead-of-Metal (the startup log said `Metal(MetalDevice(DeviceId(1)))` and
+the homebrew formula passes `-F metal` on arm64).
+
+Untested, and the two things that would identify the cause: the **f16** weights,
+abandoned before being evaluated, and a symmetric BERT-family model such as
+`bge-base-en-v1.5`. So this result condemns one quantised model on this corpus,
+not local embedding.
+
+**What it bought.** A bad embedder was identified in one eval run against a corpus
+re-embedded in five minutes. That loop is the deliverable; the model was not.
+
+**Measurement notes, both errors made here first.** Timing embeddings with
+*identical* inputs measures the server's cache — 200 copies of one string returned
+in 0.1s, "347,778 tok/s". And timing a query while an ingest is running measures
+`queue_time`, not inference: a single query read 17.6s wall against 48ms of actual
+compute, visible only in TEI's own log breakdown. Distinct inputs, and an idle
+server.
+
+**Cost, since it was the original motive.** Ingest dominates completely:
+`mistral-embed` shows 3422 calls for 6,464,693 tokens — 1,889 per call, all
+batches. A search query is ~15 tokens, so a thousand searches is ~0.2% of one
+day's spend here. Moving queries local saves nothing worth having; the honest
+argument is latency, and that requires committing the whole index to one model.
+
+## The memory subsystem gets the same retrieval (2026-08-07)
+
+Both halves ran a single arm, and they were exactly inverted: `recall` read with
+FTS5 alone, `remember` found deduplication candidates with cosine alone. Each was
+blind in the way the other was not, and the docs pipeline had already measured
+what that costs — the union is worth 0.07 of recall@10 over either arm, because
+the arms fail differently.
+
+Both now use `Docs.Fusion.rrf/3` over the same two arms, scoped before the depth
+cut. Fusion is used for **candidate recall only, never for ordering**, which is
+the role it plays in `Docs.Search` too — and in `remember` that distinction is
+load-bearing: the fused set is re-sorted by cosine before `decide/2` sees it, so
+`@similarity_threshold`, the nearest-neighbour-rendered-in-full rule and the
+prompt all keep the semantics they were calibrated with. The change is confined
+to *which* entries are considered.
+
+`recall` still works with no API key: no embedding means the keyword path,
+including its `ilike` fallback. A model mismatch takes the same route rather than
+comparing across vector spaces.
+
+Measured on the 14-entry base:
+
+```
+"my logs are empty even though something clearly went wrong"
+   FTS only  MISS        hybrid  rank 1      <- zero lexical overlap
+"the server hangs forever when it asks the client for something"
+   FTS only  rank 2      hybrid  rank 2
+"why did my benchmark numbers move when I added an unrelated package"
+   FTS only  MISS        hybrid  MISS
+```
+
+One clear win, one tie, one miss for both — and for `remember`, **a verified
+no-op**: at 14 entries both arms return the whole base, so fusion adds nothing and
+the cosine re-sort reproduces the previous selection exactly, same two neighbours
+at the same distances. That is the expected result and the reason to trust the
+change: it cannot alter behaviour until the base exceeds the arm depth of 10, and
+it is calibrated to do nothing before then.
+
+Worth remembering when judging it: the +0.07 figure comes from 3891 rows across 11
+packages. A 14-entry base is one topic, where cosine is topic-dominated — the same
+property that forced `@similarity_threshold` from 0.70 to 0.80 — so this corpus
+cannot demonstrate the benefit even where it exists.
+
+## Version resolution, proven on a real release (2026-08-07)
+
+Until now the lockfile switch had only been exercised against a contrived
+`test_lock/mix.lock` pinning an older `nimble_options`. `anubis_mcp` publishing
+**2.0.0** provided the real case, mid-session, with no restart:
+
+```
+notices:
+  Replaced indexed 'anubis_mcp' v1.14.0 with v2.0.0, which
+  /Users/nevendrean/code/local_hex_mcp/mix.lock pins.
+  Docs for 'anubis_mcp' v2.0.0 were just indexed (1223 docs)
+```
+
+`Lockfile.version/1` re-reads `$PROJECT_ROOT/mix.lock` on every lookup rather than
+caching at boot, which is what let a `mix deps.get` performed outside the server
+take effect on the next query. The switch, download, chunking and embedding of
+1223 documents all completed **inside the tool call** — no "still being indexed"
+notice — and the answer came from 2.0.0 rather than the stale 1.14.0.
+
+Two things this validated that the contrived test could not. A *major* version is
+where documentation is most likely to be restructured, and all 28 eval
+expectations still resolved afterwards. And the answer itself was only correct
+because of the switch: 2.0.0 introduces `Anubis.Protocol.Registry` and the
+`2025-11-25` protocol version, neither of which exists in 1.14.0 — serving the
+indexed version would have produced a confident, wrong answer with nothing
+signalling it.
+
+## Things that stay true
+
+- **BM25 is collection-global.** FTS5's `bm25()` uses corpus-wide document
+  frequency and average length, so indexing *any* package shifts keyword ranking
+  for queries in *other* packages. Vector search is immune. No eval spanning an
+  ingest is comparable; the report prints `corpus N packages / M rows` so a
+  mismatched comparison is visible rather than silently wrong.
+- **The index is single-model**, and that now covers `knowledge` as well as
+  `package_docs` — see [The embedding model is the index](#the-embedding-model-is-the-index).
+  The lesson generalises: a guard that is checked in one place and bypassed in
+  another is not a guard. `embedding_config` was consulted by ingestion and
+  search, and ignored by `mix docs.reindex --only`, by an interrupted reindex, and
+  by `Memory`. Three holes in one invariant, all silent, all found in a single
+  afternoon of actually switching models.
+- **One query is 0.04 at n=28.** That is the size of most differences ever claimed
+  here. Three separate conclusions in the archive rested on a single query and two
+  of them were wrong. Nulls are the robust results; they only need an absence.
+- **A query the corpus cannot answer measures coverage, not retrieval.** The
+  `client_credentials` query failed every arm for days because boruta documents
+  the grant nowhere in prose. It depressed every number while hiding real
+  movement.
+- **`recall@k` asks "did the expected document appear", never "was the rest of the
+  page any good".** A single-target expectation marks at most one row; a good
+  result set is several. Every recall number here is a floor on answer quality
+  reported as though it described it. `mix docs.eval --judged` and `P@k` exist to
+  close that, and `priv/eval/judgements.md` is at 6 of 215 marks.
+- **`docs.drift` compares text only.** It cannot see a change to `embed_text/1`,
+  to `signature`, or to the embedding model — all of which need `mix docs.reindex`.
+- **The value being transformed goes first.** `SectionChunker.prepend_heading/2`
+  bound backwards and silently returned `[]`, dropping every oversized section;
+  `Reranker.rerank/2` made the same mistake weeks later and blew up on first run.
+
+## Reproducing
+
+```sh
+AI_API_KEY=… mix docs.eval --limit 10          # shipped configuration
+AI_API_KEY=… mix docs.eval --limit 10 --verbose
+AI_RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L4-v2 AI_API_KEY=… mix docs.eval --limit 10
+mix docs.eval --modes fts --no-rerank          # needs no API key
+mix docs.drift                                 # would a refresh change anything?
+
+# sweeping an embedder, with a local endpoint (free, so it is worth doing)
+AI_EMBED_URL=http://localhost:8081/v1 AI_EMBED_MODEL=<model> AI_API_KEY=… \
+  mix docs.reindex --yes && mix docs.eval --limit 10
+```
+
+Changing `AI_EMBED_MODEL` re-embeds everything, so the eval is the *only* honest
+way to judge one: a model that reads well on a benchmark can still collapse
+`candidate recall` on this corpus, and one did.
+
+---
+
+# Archive
+
+Everything below is the chronological record of how the above was arrived at,
+2026-08-06 to 2026-08-07. **The numbers are not comparable to the tables above or
+to each other**: they span three query sets (25, 26, 28), four corpora, a chunker
+replacement, a tokenizer change, an embedding-model switch, the `signature`-aware
+reranker, and `limit: 5` rather than 10. Several conclusions stated below were
+later overturned — where that happened it is noted at the head of the section, and
+the head of this file is always the current one.
+
+Kept for the reasoning and the failure modes, not for the measurements.
+
 # Retrieval eval baseline — 2026-08-06
 
 <https://claude.ai/code/artifact/2647ad93-d8f4-400f-bd12-a6bed3de880e?via=auto_preview>
@@ -410,6 +831,10 @@ The smallest model wins on every axis. Capacity is not the constraint on this
 task — configuration was, and recall@5 is now saturated, so a stronger reranker
 has nothing left to win here. Selectable via `AI_RERANK_MODEL` if that changes.
 
+> **Superseded by Step 12.** These three were measured on 26 queries and a
+> 2755-row corpus. Step 12 sweeps six models on the corrected 28-query set at
+> 3967 rows and reaches a different default.
+
 **Why jina fails specifically.** `Bumblebee.load_spec/1` succeeds and returns
 `Bumblebee.Text.Roberta{architecture: :for_sequence_classification}` — the
 architecture is fine. The weights are not: jina ships flash-attention parameter
@@ -421,6 +846,11 @@ layout, so a remapping loader is possible — but the two larger models that *do
 load both scored worse, so there is no reason to expect it to pay.
 
 ### Final configuration and control
+
+> **Superseded.** `MiniLM-L-6-v2` is no longer the default and nothing is loaded
+> unless `AI_RERANK_MODEL` is set. The claim that "all three stages are needed"
+> held only while `limit` was 5; at 10 the reranker cannot change what is
+> returned.
 
 `sequence_length: 512`, `batch_size: 10`, `AI_RERANK_MODEL` defaulting to
 `ms-marco-MiniLM-L-6-v2`; retrieval 15 per arm, RRF, rerank top 10.
@@ -573,12 +1003,19 @@ Honest reading, now that the metric is not being flattered:
 - On symbols it remains perfect and unambiguous.
 - recall@5 is no longer saturated (0.96), so the set can measure again.
 
+> **Superseded** — `limit` is 10 again, with the reranker off. The observation
+> below is still true and is the cost being accepted: ranks 6-10 are RRF's and
+> nothing ranks them.
+
 `search_docs` now returns `limit: 5` rather than 10. The rerank pool is 10, so
 returning all of it handed back exactly the tail the cross-encoder had just
 demoted — measured live, the last two or three rows of every search were
 changelog entries and unrelated functions.
 
 ## Step 5 — bounding the reranker's authority (2026-08-06)
+
+> Still current *when the reranker is enabled* — `fused` remains the strategy.
+> The audit in Step 7 shows the supporting measurement is one query wide.
 
 The PKCE query survived every fix so far: three retrieval arms put the guide at
 rank 1, the cross-encoder dropped it to 8, and with `limit: 5` it stopped being
@@ -1127,6 +1564,88 @@ on the first run. That is the *second* occurrence of exactly this bug —
 every oversized section. The rule that would have prevented both: **the value
 being transformed goes first**, so the function pipes the way it reads. Both
 signatures now follow it.
+
+## Step 12 — the reranker sweep (2026-08-07)
+
+> **Superseded.** This picked `MiniLM-L4-v2` as the *default*. The reranker is
+> now off by default and L4 is the opt-in; and every number here predates the
+> `signature`-aware reranker, which moved reranked MRR 0.78 → 0.81 on its own.
+
+Prompted by switching the live server to `bge-reranker-base` and finding it
+visibly better on one query while feeling much slower.
+
+**The repo ids in circulation are wrong.** HuggingFace renamed these: the
+canonical form dropped the dash before the layer count.
+
+```
+cross-encoder/ms-marco-MiniLM-L-6-v2   ->  ms-marco-MiniLM-L6-v2
+cross-encoder/ms-marco-TinyBERT-L-2-v2 ->  ms-marco-TinyBERT-L2-v2
+cross-encoder/ms-marco-TinyBERT-L-4    ->  ms-marco-TinyBERT-L4
+```
+
+The old forms still redirect, so the previous default kept working. But
+`ms-marco-TinyBERT-L-4-v2` — which appears in several model lists — does not
+exist in either scheme and fails to load: the `-v2` suffix belongs to the L2
+line, not L4.
+
+### Six models, 28 queries, corpus 11 packages / 3967 rows
+
+| model | params | all r@5 | all MRR | concept r@5 | concept MRR | symbol | ms |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| TinyBERT-L2-v2 | 4M | 0.93 | 0.78 | 0.88 | 0.62 | 1.00 / 1.00 | **55** |
+| TinyBERT-L4 | 14M | 0.93 | 0.79 | 0.88 | 0.63 | 1.00 / 1.00 | 229 |
+| TinyBERT-L6 | 22M | 0.96 | 0.73 | 0.94 | 0.61 | 1.00 / **0.90** | 1017 |
+| **MiniLM-L4-v2** | 19M | **0.96** | **0.80** | **0.94** | **0.66** | 1.00 / 1.00 | **279** |
+| MiniLM-L6-v2 | 22M | 0.96 | 0.80 | 0.94 | 0.65 | 1.00 / 1.00 | 403 |
+| MiniLM-L12-v2 | 33M | 0.93 | 0.81 | 0.88 | 0.66 | 1.00 / 1.00 | 772 |
+| bge-reranker-base | 278M | 0.93 | 0.78 | 0.88 | 0.61 | 1.00 / 1.00 | 1930 |
+
+**Capacity is not the axis.** Sorted by parameters the quality column does not
+move: 4M and 278M both score 0.93/0.78 while 19M and 22M lead. A **70x** span in
+size produces a 0.03 spread in recall@5 — one query — against a **35x** span in
+latency. Read strictly the table says all seven are equivalent on quality and
+differ enormously in speed, so take the fast one.
+
+`MiniLM-L4-v2` is the new default: it matches L6 on every quality number at a
+third less latency. That is a latency argument, not a quality one. `TinyBERT-L6`
+is the one to avoid — 0.90 symbol MRR, the only model that fails the case every
+other one gets perfect.
+
+### The property recall@5 cannot see
+
+The observation that started this was real, and the aggregate is blind to it. On
+`"Building a Server"` against anubis_mcp, every model puts the guide at rank 1 —
+so recall@5 is 1.00 for all of them — but they differ in whether the *sibling*
+page leaks into the top five:
+
+| model | `building-a-client` rank | off-page rows in top 5 | ms |
+| --- | --- | --- | --- |
+| TinyBERT-L2-v2 | 2 | 2 | 123 |
+| MiniLM-L4-v2 | 2 | 1 | 343 |
+| MiniLM-L6-v2 | 3 | 1 | 472 |
+| MiniLM-L12-v2 | 4 | 1 | 852 |
+| bge-reranker-base | **absent** | **0** | 1994 |
+
+Monotone in capacity, and only bge removes it. TinyBERT-L2's second intruder is
+`Anubis.Server.Response.completion/0` — "Start building a completion response",
+the pure BM25 artefact that shares only `building` and `a` — so the weakest model
+admits the noise the others reject.
+
+**But "better" is doing work there.** `building-a-client.html` is not junk: for a
+query reading *"Building a Server"*, the guide covering the other half of the
+same protocol is defensible, and a reader might want it. `completion/0` is noise;
+the client guide is a judgement call. So the axis these models differ on is not
+accuracy but **how aggressively they reject topically-adjacent documents**, and
+whether strict is right is a preference rather than a measurement.
+
+Two things follow. Capacity buys strictness, not correctness — which is why bge
+wins the eye test and loses the aggregate. And `recall@5` asks "did the expected
+document appear", never "was the rest of the page any good", which is exactly the
+gap `mix docs.eval --judged` and `P@k` exist to close. That file is still at 6 of
+215 marks, so the question the eye is asking remains unanswered by any number
+here.
+
+---
 
 # Execute commands in an IEX sesion
 

@@ -5,6 +5,8 @@ defmodule StdioMcp.Memory do
   import Ecto.Query, only: [from: 2]
   import SqliteVec.Ecto.Query
   alias StdioMcp.AI.Client
+  alias StdioMcp.Docs.EmbeddingConfig
+  alias StdioMcp.Docs.Fusion
   alias StdioMcp.Knowledge
   alias StdioMcp.Knowledge.Decision
   alias StdioMcp.Knowledge.Schemas
@@ -57,22 +59,22 @@ defmodule StdioMcp.Memory do
   # -- Public API --
 
   @memory_search_schema NimbleOptions.new!(
-    limit: [
-      type: :pos_integer,
-      default: 5,
-      doc: "Maximum knowledge search results to return."
-    ],
-    kind: [
-      type: {:or, [:string, :nil]},
-      default: nil,
-      doc: "Kind filter."
-    ],
-    package: [
-      type: {:or, [:string, :nil]},
-      default: nil,
-      doc: "Package filter."
-    ]
-  )
+                          limit: [
+                            type: :pos_integer,
+                            default: 5,
+                            doc: "Maximum knowledge search results to return."
+                          ],
+                          kind: [
+                            type: {:or, [:string, nil]},
+                            default: nil,
+                            doc: "Kind filter."
+                          ],
+                          package: [
+                            type: {:or, [:string, nil]},
+                            default: nil,
+                            doc: "Package filter."
+                          ]
+                        )
 
   def search(query_text, opts \\ []) when is_binary(query_text) do
     validated = NimbleOptions.validate!(opts, @memory_search_schema)
@@ -83,7 +85,10 @@ defmodule StdioMcp.Memory do
       |> scope_kind(presence(validated[:kind]))
       |> scope_package(presence(validated[:package]))
 
-    run_fts_knowledge(base_query, query_text, limit)
+    case query_embedding(query_text) do
+      {:ok, embedding} -> hybrid_knowledge(base_query, query_text, embedding, limit)
+      :unavailable -> run_fts_knowledge(base_query, query_text, limit)
+    end
   end
 
   # Each filter is "apply it or don't", which is two function heads rather than
@@ -115,7 +120,7 @@ defmodule StdioMcp.Memory do
   def process_remember(text, request_id \\ nil) do
     if Client.memory_enabled?() do
       with {:ok, embedding} <- Client.embed(text),
-           neighbors <- search_by_vector(embedding, limit: @neighbor_limit),
+           neighbors <- neighbors(text, embedding, @neighbor_limit),
            {:ok, decision} <- decide(text, neighbors),
            :ok <- log_decision(decision, neighbors),
            {:ok, result} <- apply_decision(decision) do
@@ -246,14 +251,179 @@ defmodule StdioMcp.Memory do
   end
 
   # -- FTS & Vector Search --
+  #
+  # Both halves of this subsystem used to run one arm. `recall` read with FTS5
+  # alone; `remember` found its deduplication candidates with cosine alone —
+  # exactly inverted, and both blind in the way the other was not. The docs
+  # pipeline had already measured what that costs: the union of the two arms is
+  # worth 0.07 of recall@10 over either alone, because they fail differently. A
+  # keyword arm cannot reach a question phrased in words the entry never uses; a
+  # bi-encoder ranks a shared literal identifier no better than a paraphrase.
+  #
+  # Fusion is used for **candidate recall only**, never for ordering — the same
+  # role it plays in `Docs.Search`, and the reason `remember` re-sorts by cosine
+  # below.
+
+  # Shallow on purpose. RRF scores agreement, so depth lets mediocre-but-agreed
+  # rows outrank a strong single-arm hit; `Docs.Fusion` documents the measurement.
+  # A knowledge base is small, so this is mostly about the shape being right as it
+  # grows.
+  defp arm_depth(limit), do: max(limit * 3, 10)
+
+  # `nil` rather than an error tuple for every unavailable case, because the
+  # caller's response is identical for all of them: fall back to keyword search.
+  # No key is the ordinary case — `recall` is expected to work offline — and a
+  # model mismatch means the stored vectors are not comparable with a fresh query
+  # embedding, which `Docs.Search` handles the same way.
+  defp query_embedding(text) do
+    with :ok <- embedding_usable(),
+         {:ok, embedding} <- Client.embed(text) do
+      {:ok, embedding}
+    else
+      _ -> :unavailable
+    end
+  end
+
+  defp embedding_usable do
+    case EmbeddingConfig.check() do
+      :ok -> :ok
+      :unset -> :ok
+      {:mismatch, _stored, _current} -> :mismatch
+    end
+  end
+
+  defp hybrid_knowledge(base_query, query_text, embedding, limit) do
+    depth = arm_depth(limit)
+
+    case Fusion.rrf(
+           [fts_ids(base_query, query_text, depth), vector_ids(base_query, embedding, depth)],
+           limit
+         ) do
+      # Both arms empty. `run_fts_knowledge/3` carries an `ilike` fallback for the
+      # case where FTS tokenisation matches nothing, which is worth keeping.
+      [] -> run_fts_knowledge(base_query, query_text, limit)
+      ids -> hydrate(base_query, ids)
+    end
+  end
+
+  # Scoped by `base_query` before the depth cut, so a `kind:` or `package:` filter
+  # narrows what each arm ranks rather than being applied to an already-truncated
+  # list — the same reason `Docs.Search` joins its arms to the scoped query.
+  defp fts_ids(base_query, query_text, depth) do
+    case sanitize(query_text) do
+      "" ->
+        []
+
+      match ->
+        from(k in base_query,
+          join: fts in "knowledge_fts",
+          on: k.id == fts.rowid,
+          where: fragment("knowledge_fts MATCH ?", ^match),
+          order_by: [asc: fragment("rank")],
+          limit: ^depth,
+          select: k.id
+        )
+        |> Repo.all()
+    end
+  rescue
+    e ->
+      Logger.warning("[Memory] knowledge FTS arm failed: #{Exception.message(e)}")
+      []
+  end
+
+  defp vector_ids(base_query, embedding, depth) do
+    query_json = Jason.encode!(embedding)
+
+    from(k in base_query,
+      where: not is_nil(k.embedding),
+      order_by: [asc: vec_distance_cosine(k.embedding, ^query_json)],
+      limit: ^depth,
+      select: k.id
+    )
+    |> Repo.all()
+  rescue
+    e ->
+      Logger.warning("[Memory] knowledge vector arm failed: #{Exception.message(e)}")
+      []
+  end
+
+  # `id IN (…)` returns storage order, so the fused ranking has to be reimposed.
+  defp hydrate(base_query, ids) do
+    index =
+      from(k in base_query, where: k.id in ^ids)
+      |> Repo.all()
+      |> Map.new(&{&1.id, &1})
+
+    Enum.flat_map(ids, fn id -> index |> Map.get(id) |> List.wrap() end)
+  end
+
+  # -- Deduplication candidates for `remember` --
+
+  # Fusion widens the candidate set; cosine still orders it. `decide/2` renders
+  # only the nearest neighbour in full and applies `@similarity_threshold` to a
+  # distance, so a candidate the keyword arm found must carry a real distance and
+  # must not displace a closer one just because both arms agreed on it. Re-sorting
+  # after hydration keeps every downstream rule exactly as it was calibrated, and
+  # confines the change to *which* entries get considered.
+  defp neighbors(text, embedding, limit) do
+    case embedding_usable() do
+      :mismatch ->
+        skip_neighbors()
+
+      :ok ->
+        base = from(k in Knowledge, where: k.outdated == false and not is_nil(k.embedding))
+        depth = arm_depth(limit)
+
+        [fts_ids(base, text, depth), vector_ids(base, embedding, depth)]
+        |> Fusion.rrf(depth)
+        |> with_distance(embedding)
+        |> Enum.sort_by(& &1.distance)
+        |> Enum.take(limit)
+    end
+  end
+
+  # Returning nothing rather than an error: with no neighbours `decide/2` creates
+  # a new entry, which can store a duplicate that a later pass merges. Trusting a
+  # distance computed across two embedding models can merge into the *wrong* entry
+  # or discard a real learning, and neither is recoverable.
+  defp skip_neighbors do
+    %{model: stored} = EmbeddingConfig.get()
+
+    Logger.warning(
+      "[Memory] knowledge entries were embedded with '#{stored}' but the server is " <>
+        "configured for '#{Client.embed_model()}' — skipping neighbour search, so this " <>
+        "entry is stored without deduplication. Run `mix docs.reindex` to re-embed."
+    )
+
+    []
+  end
+
+  # Every candidate gets a real cosine distance, including one only the keyword
+  # arm found — otherwise the threshold could not be applied to it at all.
+  defp with_distance(ids, embedding) do
+    query_json = Jason.encode!(embedding)
+
+    index =
+      from(k in Knowledge,
+        where: k.id in ^ids,
+        select: {k, vec_distance_cosine(k.embedding, ^query_json)}
+      )
+      |> Repo.all()
+      |> Map.new(fn {entry, distance} -> {entry.id, Map.put(entry, :distance, distance)} end)
+
+    Enum.flat_map(ids, fn id -> index |> Map.get(id) |> List.wrap() end)
+  end
+
+  defp sanitize(query_text) do
+    query_text
+    |> String.replace(~r/[^\w\s]/, " ")
+    |> String.split()
+    |> Enum.reject(&(&1 in ~w(how to define a tool with the package version)))
+    |> Enum.join(" OR ")
+  end
 
   defp run_fts_knowledge(base_query, query_text, limit) do
-    sanitized_query =
-      query_text
-      |> String.replace(~r/[^\w\s]/, " ")
-      |> String.split()
-      |> Enum.reject(&(&1 in ~w(how to define a tool with the package version)))
-      |> Enum.join(" OR ")
+    sanitized_query = sanitize(query_text)
 
     fts_query =
       if sanitized_query != "" do
@@ -285,20 +455,6 @@ defmodule StdioMcp.Memory do
     e ->
       Logger.warning("[Memory] Knowledge FTS failed: #{Exception.message(e)}")
       []
-  end
-
-  defp search_by_vector(embedding, opts) when is_list(embedding) do
-    limit = Keyword.get(opts, :limit, 3)
-    query_json = Jason.encode!(embedding)
-
-    from(k in Knowledge,
-      where: k.outdated == false and not is_nil(k.embedding),
-      select: {k, vec_distance_cosine(k.embedding, ^query_json)},
-      order_by: [asc: vec_distance_cosine(k.embedding, ^query_json)],
-      limit: ^limit
-    )
-    |> Repo.all()
-    |> Enum.map(fn {entry, distance} -> Map.put(entry, :distance, distance) end)
   end
 
   # -- LLM Curation Pipeline (decide / ask_mistral / structure_text) --

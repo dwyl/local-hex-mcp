@@ -35,7 +35,7 @@ defmodule StdioMcp.MixProject do
 
   defp deps do
     [
-      {:anubis_mcp, "~> 1.14.0"},
+      {:anubis_mcp, "~> 2.0.0"},
       {:ecto_sqlite3, "~> 0.17"},
       {:sqlite_vec, "~> 0.1"},
       {:finch, "~> 0.18"},

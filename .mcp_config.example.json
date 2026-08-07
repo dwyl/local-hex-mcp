@@ -1,20 +1,21 @@
 {
+  "_comment": "Antigravity CLI (.agents/mcp_config.json), which supports 'cwd' natively so no sh -c wrapper is needed. Copy into the repo you want to USE the server from and replace the two ALL-CAPS placeholders. MCP_CLONE is where you cloned local_hex_mcp; YOUR_PROJECT is the repo you are editing. DATABASE_PATH is deliberately absent: it defaults to <MCP_CLONE>/priv/mcp.db, which is also what 'mix setup' migrates.",
+
   "mcpServers": {
     "hex_local": {
       "command": "/opt/homebrew/bin/mix",
       "args": ["mcp.server", "--no-compile"],
-      "cwd": "your-path",
+      "cwd": "/ABSOLUTE/PATH/TO/MCP_CLONE",
       "env": {
         "MIX_ENV": "prod",
         "MIX_QUIET": "1",
-        "AI_API_KEY": "your-mistral-api-key",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "MCP_LOG_FILE": "/absolute/path/to/local_hex_mcp/tmp_logs.txt",
-        "MCP_LOG_LEVEL": "warning",
-        "DATABASE_PATH": "your-path",
-        "EMBED_BATCH_SIZE": "50",
-        "EMBED_PAUSE_MS": "500",
-        "PROJECT_ROOT": "/Users/nevendrean/code/local_hex_mcp"
+
+        "AI_API_KEY": "YOUR-API-KEY",
+        "PROJECT_ROOT": "/ABSOLUTE/PATH/TO/YOUR_PROJECT",
+
+        "MCP_LOG_FILE": "/ABSOLUTE/PATH/TO/MCP_CLONE/tmp_logs.txt",
+        "MCP_LOG_LEVEL": "warning"
       }
     }
   }

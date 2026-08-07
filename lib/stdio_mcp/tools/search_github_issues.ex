@@ -62,8 +62,13 @@ defmodule StdioMcp.Tools.SearchGithubIssues do
   rescue
     e ->
       require Logger
-      Logger.error("[SearchGithubIssues] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
 
-      {:reply, Response.text(Response.tool(), "Search GitHub issues failed: #{Exception.message(e)}"), frame}
+      Logger.error(
+        "[SearchGithubIssues] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}"
+      )
+
+      {:reply,
+       Response.text(Response.tool(), "Search GitHub issues failed: #{Exception.message(e)}"),
+       frame}
   end
 end

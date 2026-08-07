@@ -2,6 +2,10 @@ defmodule StdioMcp.Application do
   @moduledoc false
   use Application
 
+  require Logger
+
+  alias StdioMcp.AI.Client
+
   @impl true
   def start(_type, _args) do
     # Redirect Erlang logger to stderr so stdout stays completely clean for JSON-RPC
@@ -13,21 +17,27 @@ defmodule StdioMcp.Application do
     # Attach Telemetry handler to record AI token usage into SQLite
     StdioMcp.Telemetry.attach()
 
-    provider = Application.get_env(:stdio_mcp, :ai_api_url, "https://api.mistral.ai")
+    # One pool per distinct endpoint. Embeddings and chat usually share a provider
+    # and collapse to a single entry; when they do not — a local embedding server
+    # with chat still on a hosted provider — an unlisted host would silently fall
+    # back to Finch's default pool instead of the size configured here.
+    pools =
+      [Client.embed_url(), Client.chat_url()]
+      |> Enum.uniq()
+      |> Map.new(&{&1, [size: 10]})
 
     children =
       [
         StdioMcp.Repo,
-        {Finch, name: StdioMcp.Finch, pools: %{provider => [size: 10]}},
+        {Finch, name: StdioMcp.Finch, pools: pools},
         # Two registries back StdioMcp.Docs.IngestionJob: the unique one names the
         # single in-flight job per {module, package, version}, the duplicate one
         # holds every caller waiting on it.
         {Registry, keys: :unique, name: StdioMcp.IngestionRegistry},
         {Registry, keys: :duplicate, name: StdioMcp.IngestionWaiters},
         StdioMcp.Docs.RepairBudget,
-        {Task.Supervisor, name: StdioMcp.TaskSupervisor},
-        {Nx.Serving, serving: serving_reranker(), name: Rerank}
-      ] ++ mcp_children()
+        {Task.Supervisor, name: StdioMcp.TaskSupervisor}
+      ] ++ reranker_children() ++ mcp_children()
 
     opts = [strategy: :one_for_one, name: StdioMcp.Supervisor]
 
@@ -53,11 +63,36 @@ defmodule StdioMcp.Application do
   # head, which rules out most of the current state of the art before quality
   # enters the picture. Checked 2026-08-06:
   #
-  #   cross-encoder/ms-marco-MiniLM-L-6-v2       OK   Bert, 22M   (default)
-  #   cross-encoder/ms-marco-MiniLM-L-12-v2      OK   Bert, 33M
+  #   cross-encoder/ms-marco-MiniLM-L4-v2        OK   Bert, 19M   (default)
+  #   cross-encoder/ms-marco-MiniLM-L6-v2        OK   Bert, 22M
+  #   cross-encoder/ms-marco-MiniLM-L12-v2       OK   Bert, 33M
+  #   cross-encoder/ms-marco-TinyBERT-L2-v2      OK   Bert, 4M
+  #   cross-encoder/ms-marco-TinyBERT-L6         OK   Bert, 22M
   #   BAAI/bge-reranker-base                     OK   Roberta, 278M
   #   mixedbread-ai/mxbai-rerank-xsmall-v1       no   DebertaV2 unsupported
   #   jinaai/jina-reranker-v2-base-multilingual  no   custom arch, weights unreadable
+  #
+  # Note the repo ids were renamed upstream: `ms-marco-MiniLM-L-6-v2` now
+  # redirects to `ms-marco-MiniLM-L6-v2`. The old form still resolves; the new
+  # one is used here so nothing depends on a redirect.
+  #
+  # Capacity is not the axis. Measured across a 70x parameter range on the
+  # 28-query eval, quality spans 0.03 of recall@5 — one query — while latency
+  # spans 35x:
+  #
+  #   model             params   all r@5 / MRR   concept r@5   symbol MRR   ms
+  #   TinyBERT-L2-v2      4M       0.93 / 0.81      0.88          1.00        69
+  #   TinyBERT-L4        14M       0.93 / 0.79      0.88          1.00       229
+  #   MiniLM-L4-v2       19M       0.96 / 0.81      0.94          1.00       294
+  #   MiniLM-L6-v2       22M       0.96 / 0.82      0.94          1.00       414
+  #   MiniLM-L12-v2      33M       0.93 / 0.81      0.88          1.00       772
+  #   TinyBERT-L6        22M       0.96 / 0.73      0.94          0.90      1017
+  #   bge-reranker-base 278M       0.93 / 0.78      0.88          1.00      1930
+  #
+  # TinyBERT-L6 is the one to avoid: 0.90 symbol MRR, the only model that fails
+  # the case every other one gets perfect, and slower than MiniLM-L6. Among the
+  # rest, if one is wanted, MiniLM-L4-v2: it matches L6 on every number at 70% of
+  # the time, and it is the smallest that does not drop a query L6 keeps.
   #
   # `sequence_length` is the setting that matters most and the one that looks
   # least important. At 128 the query/document pair is truncated to roughly 400
@@ -70,19 +105,87 @@ defmodule StdioMcp.Application do
   # `batch_size` should track the rerank depth: Nx.Serving pads a short batch to
   # the compiled size, so a 10-candidate pool costs the same as 20 when compiled
   # for 20.
-  @default_rerank_model "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  # Off unless `AI_RERANK_MODEL` names a model, which is a judgement about the
+  # *consumer* rather than about the models above. `search_docs` answers an LLM
+  # that reads every row it is given before replying, so it does its own ranking
+  # downstream and rank-within-the-payload is close to worthless; what it cannot
+  # repair is a document that never arrives. Those are exactly the two columns
+  # reranking trades between:
+  #
+  #   rrf, no reranker, limit 10    recall 1.00   MRR 0.76    46ms
+  #   rrf, no reranker, limit  5    recall 0.96   MRR 0.76    44ms
+  #   rrf + MiniLM-L4,  limit  5    recall 0.96   MRR 0.81   294ms
+  #   rrf + TinyBERT-L2, limit 5    recall 0.93   MRR 0.81    69ms
+  #
+  # Returning ten unranked beats reranking five on the only axis that survives the
+  # consumer, at a sixth of the latency, and skipping the serving takes a ~100MB
+  # HuggingFace download and an EXLA compile out of `Application.start/2` — which
+  # happened inside the window an MCP client waits for the server to come up, so a
+  # cold machine's first connection could time out and look broken.
+  #
+  # The stage is kept, not deleted: a consumer that reads only the first result
+  # wants it back, and it is one env var away. `Reranker.rerank/2` already gates
+  # on the serving being registered, so not starting it is the entire switch.
+  defp reranker_children do
+    case Application.get_env(:stdio_mcp, :ai_rerank_model) do
+      nil -> []
+      model -> reranker_child(model)
+    end
+  end
 
-  def serving_reranker() do
-    repo = {:hf, System.get_env("AI_RERANK_MODEL", @default_rerank_model)}
+  # A name that does not load disables reranking; it does not stop the server.
+  # This used to be `{:ok, x} = Bumblebee.load_model(repo)`, so a typo in
+  # `AI_RERANK_MODEL` raised a MatchError *inside* `start/2` and the application
+  # never started — the MCP client saw a server that would not come up, with the
+  # reason on a stderr stream it discards. That is the loudest possible failure
+  # for the least important stage: every other part of the pipeline degrades (no
+  # embedding gives FTS-only, no serving gives fused order), and reranking is the
+  # one component whose absence costs no recall at all.
+  #
+  # Realistic trigger, not a hypothetical: `ms-marco-TinyBERT-L-4-v2` appears in
+  # circulating model lists and does not exist in either naming scheme — the `-v2`
+  # suffix belongs to the L2 line, not L4. HuggingFace 401s it.
+  defp reranker_child(model) do
+    case serving_reranker(model) do
+      {:ok, serving} ->
+        [{Nx.Serving, serving: serving, name: Rerank}]
 
-    {:ok, model_info} = Bumblebee.load_model(repo)
-    {:ok, tokenizer} = Bumblebee.load_tokenizer(repo)
+      {:error, reason} ->
+        # Logger rather than a direct write to stderr, which is what
+        # `runtime.exs` uses for its config warnings: the MCP client discards
+        # stderr, so the one message explaining why reranking is off would be
+        # invisible in precisely the session where it matters. Logger also
+        # reaches `MCP_LOG_FILE`.
+        #
+        # `error`, not `warning`: `config.exs` sets `level: :error`, so anything
+        # below it is discarded before a handler sees it — a warning here would
+        # have been as invisible as the stderr write it replaced. The level is
+        # also honest. The operator asked for a reranker and did not get one.
+        Logger.error(
+          "AI_RERANK_MODEL=#{model} did not load (#{inspect(reason)}) — " <>
+            "starting without reranking; searches return the fused RRF order"
+        )
 
-    %Nx.Serving{} =
-      Bumblebee.Text.cross_encoding(model_info, tokenizer,
-        defn_options: [compiler: EXLA],
-        compile: [batch_size: 10, sequence_length: 512]
-      )
+        []
+    end
+  end
+
+  @spec serving_reranker(String.t()) :: {:ok, Nx.Serving.t()} | {:error, term()}
+  def serving_reranker(model) do
+    repo = {:hf, model}
+
+    with {:ok, model_info} <- Bumblebee.load_model(repo),
+         {:ok, tokenizer} <- Bumblebee.load_tokenizer(repo) do
+      %Nx.Serving{} =
+        serving =
+        Bumblebee.Text.cross_encoding(model_info, tokenizer,
+          # defn_options: [compiler: EMLX],
+          defn_options: [compiler: EXLA],
+          compile: [batch_size: 10, sequence_length: 512]
+        )
+
+      {:ok, serving}
+    end
   end
 
   # Adds a file log alongside the stderr handler, enabled by MCP_LOG_FILE.

@@ -51,8 +51,13 @@ defmodule StdioMcp.Tools.SearchHexPackages do
   rescue
     e ->
       require Logger
-      Logger.error("[SearchHexPackages] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}")
 
-      {:reply, Response.text(Response.tool(), "Search Hex packages failed: #{Exception.message(e)}"), frame}
+      Logger.error(
+        "[SearchHexPackages] Tool execution failed:\n#{Exception.format(:error, e, __STACKTRACE__)}"
+      )
+
+      {:reply,
+       Response.text(Response.tool(), "Search Hex packages failed: #{Exception.message(e)}"),
+       frame}
   end
 end

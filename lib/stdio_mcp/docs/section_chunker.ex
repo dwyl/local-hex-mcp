@@ -46,6 +46,23 @@ defmodule StdioMcp.Docs.SectionChunker do
   embedding — so a fragment of an options list still says what it is a fragment
   *of*, which is what the overlap was badly approximating.
 
+  `path` says what the fragment is part of; it does not say which part. Every
+  slice of one section shares a heading trail, so for the shape that most often
+  needs splitting — a flat option list under a single heading — the breadcrumb is
+  identical across siblings and discriminates nothing. Measured on the first
+  corpus built this way, 12.4% of rows fell back to a bare `- Part N`, against
+  2.1% that got a heading trail: the informative case was outnumbered six to one.
+
+  So chunks also carry `terms`, the options they actually document, read off the
+  leading inline-code span of each top-level list item:
+
+      Exqlite.Connection.connect/1 — :journal_mode, :wal_auto_check_point
+      Exqlite.Connection.connect/1 — :foreign_keys, :chunk_size
+
+  Unlike an ordinal this is real signal on both arms: the keyword index gets the
+  identifier a reader would search for, and the embedding gets a name that
+  distinguishes the fragment holding the answer from its four siblings.
+
   ## Navigation sections are dropped
 
   ExDoc guides end in a `Next steps` / `Where to go next` section that is nothing
@@ -92,11 +109,20 @@ defmodule StdioMcp.Docs.SectionChunker do
   # being able to answer. Merged into a neighbour under the same heading instead.
   @default_min_bytes 250
 
+  # Enough to tell four slices of one option list apart without turning the
+  # signature into a second copy of the chunk. The first items of a group are the
+  # ones a reader scanning the name will match on.
+  @max_terms 4
+
   @typedoc """
   `path` is the heading trail above the chunk, outermost first. Empty for a
   document with no headings, which is the common case for a function `@doc`.
+
+  `terms` are the option or member names the chunk documents, in source order.
+  Empty for prose. Where `path` is context, `terms` are identity — they are what
+  differs between slices of one section.
   """
-  @type chunk :: %{text: String.t(), path: [String.t()]}
+  @type chunk :: %{text: String.t(), path: [String.t()], terms: [String.t()]}
 
   @doc """
   Splits `markdown` into chunks that respect its structure.
@@ -126,7 +152,7 @@ defmodule StdioMcp.Docs.SectionChunker do
       # A parse failure must not lose the document. Indexing it whole is worse
       # than chunking it and better than dropping it.
       Logger.warning("[SectionChunker] falling back to whole document: #{Exception.message(e)}")
-      [%{text: String.trim(markdown), path: []}]
+      [%{text: String.trim(markdown), path: [], terms: []}]
   end
 
   defp parse(markdown), do: MDEx.parse_document!(markdown, @parse_opts)
@@ -357,7 +383,40 @@ defmodule StdioMcp.Docs.SectionChunker do
   # Slicing has neither problem and is cheaper: no writer, and size checks are a
   # subtraction over line offsets instead of a full render.
   defp render(%{path: path, nodes: nodes}, lines),
-    do: %{text: slice(nodes, lines), path: path}
+    do: %{text: slice(nodes, lines), path: path, terms: terms(nodes)}
+
+  # -- Naming a fragment by what is in it --------------------------------------
+
+  # Only a *leading* code span counts. An option list item reads
+  # "* `:busy_timeout` - Sets the busy timeout…", so the first inline code is the
+  # thing being documented; a code span anywhere else in the item is one of the
+  # values it can take (`:on`, `:memory`) and naming the chunk after those would
+  # be worse than the ordinal it replaces. The structural test is the same one
+  # `starts_with_internal_link?/1` uses for navigation detection.
+  defp terms(nodes) do
+    nodes
+    |> Enum.flat_map(&leading_term/1)
+    |> Enum.uniq()
+    |> Enum.take(@max_terms)
+  end
+
+  # A list arrives whole when the section fitted, and exploded into bare items
+  # when `split_oversized/3` opened it, so both shapes have to be handled.
+  defp leading_term(%MDEx.List{nodes: items}), do: Enum.flat_map(items, &leading_term/1)
+
+  defp leading_term(%MDEx.ListItem{nodes: [%MDEx.Paragraph{nodes: [first | _]} | _]}),
+    do: code_literal(first)
+
+  defp leading_term(_node), do: []
+
+  defp code_literal(%MDEx.Code{literal: literal}) do
+    case String.trim(literal) do
+      "" -> []
+      term -> [term]
+    end
+  end
+
+  defp code_literal(_node), do: []
 
   defp slice([], _lines), do: ""
 
@@ -391,18 +450,37 @@ defmodule StdioMcp.Docs.SectionChunker do
   defp enforce_ceiling(%{text: text} = chunk, max_bytes) when byte_size(text) <= max_bytes,
     do: [chunk]
 
-  defp enforce_ceiling(%{text: text, path: path}, max_bytes) do
+  defp enforce_ceiling(%{text: text, path: path, terms: terms}, max_bytes) do
     case TextChunker.split(text, chunk_size: max_bytes, chunk_overlap: 0, format: :markdown) do
       pieces when is_list(pieces) ->
         pieces
         |> Enum.map(& &1.text)
         |> balance_fences()
-        |> Enum.map(&%{text: String.trim(&1), path: path})
+        |> Enum.map(&%{text: String.trim(&1), path: path, terms: reparse_terms(&1, terms)})
 
       other ->
         Logger.warning("[SectionChunker] byte split failed (#{inspect(other)}) — keeping whole")
-        [%{text: text, path: path}]
+        [%{text: text, path: path, terms: terms}]
     end
+  end
+
+  # Each piece is renamed from its own text rather than inheriting the whole
+  # chunk's terms. Copying them down was written off as affecting only the rare
+  # single-oversized-code-block case; measured, `Ecto.Adapters.SQLite3`'s
+  # "Provided options" comes through here and produced three chunks all named
+  # "— :database" — the identical-siblings problem this naming exists to remove,
+  # rebuilt one layer down.
+  #
+  # A byte cut can land mid-item, so a piece may open with a continuation line
+  # and parse to no list items at all; it keeps the parent's terms rather than
+  # falling back to an ordinal, since a shared name is still better than none.
+  defp reparse_terms(text, fallback) do
+    case terms(parse(text).nodes) do
+      [] -> fallback
+      terms -> terms
+    end
+  rescue
+    _ -> fallback
   end
 
   # -- Fence balancing (only reachable via enforce_ceiling/2) -------------------

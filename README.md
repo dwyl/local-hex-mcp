@@ -1,21 +1,20 @@
 # Local Stdio MCP Server
 
-A lightweight Elixir MCP server designed to run over `stdio` transport with a local SQLite database and an `AI_API_KEY`.
+A lightweight Elixir MCP server designed to run over `stdio` with a local SQLite database and an `AI_API_KEY`.
 
 - `search_docs`: ask a question about an Elixir package; the tool answers from the local index, or downloads and digests the package first if it is not indexed yet. A first-time ingestion of a large package may exceed one tool call — the payload then reports progress and the job continues in the background.
 - `list_indexed_packages`: what is indexed, at which version, whether it is complete, and how that compares to the version this project depends on.
-- `remember`: save one or more learnings — takes a list, so a whole session's lessons go in a single call. Curation runs in the background and may merge, append to or discard what you send.
+- `remember`: save one or more learnings — takes a list, so a whole session's lessons go in a single call. AI assisted curation runs in the background and may merge, append to or discard what you send.
 - `recall`: check your knowledge database
 - `search_github_issues`: search a GitHub organization's issues and PRs, live. Not stored locally.
-
-> you can check your LLM helper consumption with `get_token_usage`.
+- check your LLM helper consumption with `get_token_usage`.
 
 ## Tech
 
 - `SQLite` + FTS5 + `sqlite-vec`
 - `anubis_mcp`: Compatible with Claude Code, Cursor, and Google Antigravity CLI (`agy`).
 - `MDEx` for markdown (parsing and source positions — never rendering), `lazy_html` (Lexbor) for HTML extraction and per-function source links
-- `Bumblebee` to run the cross-encoding reranker
+- `Bumblebee` for the optional cross-encoding reranker (off by default)
 - Cloud AI models (embeddings, chat-small, chat-medium).
 
 >[!IMPORTANT]
@@ -26,13 +25,13 @@ A lightweight Elixir MCP server designed to run over `stdio` transport with a lo
   | search_docs                                                 | Yes (embed / embed_batch)                                  | No |
  | search_hex_packages                                         | No                                                         | No |
  | search_github_issues                                        | No                                                         | No |
- | recall                                                      | Yes (embed)                                                | No |
+ | recall                                                      | Optional — hybrid FTS+vector with a key, FTS5 only without  | No |
  |  remember                                                    | Yes (embed)                                                | Yes (small & large for taxonomy & deduplication)|
 
 ## Features
 
-- **Hybrid search**: FTS5 and`vec_distance_cosine` selects candidates, rank-fusion merging process and final cross-encoding reranking.
-- **Curated knowledge memory**: submissions are embedded, compared to their nearest neighbours, and only then passed to a chat model that chooses `create`, `append`, `merge`, `replace`, `deprecate` or `discard`.
+- **Hybrid search**: FTS5 and `vec_distance_cosine` retrieve in parallel, reciprocal rank fusion merges them, and an optional cross-encoder reranks. ~30ms; recall@10 is 1.00 on the eval set without the reranker, which is why it ships off.
+- **Curated knowledge memory**: submissions are embedded, compared to their nearest neighbours, and only then passed to a chat model that chooses `create`, `append`, `merge`, `replace`, `deprecate` or `discard`. `recall` uses the same hybrid retrieval as `search_docs` — FTS5 and cosine fused by RRF — and degrades to keyword-only when no embedding is available, so it still works with no API key.
 - **HexDocs ingestion**: fetches a package's docs tarball from Hex, extracts it in memory, and indexes it with embeddings on demand. One HTTP request per package, never a page-by-page crawl.
 - **Version-aware**: with `PROJECT_ROOT` set, `latest` resolves to whatever your project's `mix.lock` pins — any age, pre-releases included — falling back to Hex's latest stable when nothing local pins the package. One version per package is kept, so results never interleave versions.
 - **GitHub issues** are queried live against the GitHub API and are *not* stored locally.
@@ -64,11 +63,26 @@ Cloning is not the whole job. Five steps, and skipping any of the first three le
 
 **1. Dependencies and database**
 
-```bash
-DATABASE_PATH="priv/mcp.db" mix setup
+```sh
+mix setup
 ```
 
-`mix setup` runs `deps.get`, `ecto.create` and `ecto.migrate`. `DATABASE_PATH` must be set for every command that touches the database, migrations included — without it Ecto uses the configured default and you migrate a different file than the server will open.
+`mix setup` runs `deps.get`, `ecto.create` and `ecto.migrate`. The database path
+is compiled in as `<this repo>/priv/mcp.db` — an absolute path, so it does not
+depend on where you run the command from, and the server opens the same file
+without being told. **Leave `DATABASE_PATH` unset** and setup and server cannot
+disagree.
+
+Set it only to give a project its own database, in which case set it *both* here
+and in the MCP config, or you will migrate one file and read another.
+
+> **One database is the normal case.** `PROJECT_ROOT` is per-project — each
+> project's `.mcp.json` names its own repo — but they can all share the default
+> database, and usually should: one `mix setup`, one index, no paths to keep in
+> sync. Only one version per package is kept, so the cost appears in exactly one
+> situation: two projects pinning *different* versions of the *same* package, which
+> then re-ingests on each switch. The search says so when it happens, and the fix
+> is a separate `DATABASE_PATH` for that project.
 
 **2. Compile for `prod`, not `dev`**
 
@@ -78,23 +92,48 @@ MIX_ENV=prod mix compile
 
 The MCP config below runs `mix mcp.server --no-compile` under `MIX_ENV=prod`, so a `dev` build does not satisfy it. This is also the step to repeat after *any* code change — and recompiling alone is not enough, the server must then be reconnected, because a running BEAM keeps the modules it already loaded.
 
-**3. Warm the reranker**
+**3. AI Coding assistant config file**
+
+Copy `.mcp.example.json` (Claude Code, Cursor) or `.mcp_config.example.json`
+(Antigravity) into the project you want to *use* the server from, and replace the
+two ALL-CAPS placeholders.
+
+**Two different directories are involved, and mixing them up fails silently.**
+
+| placeholder | what it is | appears in |
+| --- | --- | --- |
+| `MCP_CLONE` | where you cloned **this** repo — the server has to run from here, because `mix` does not walk up directories to find `mix.exs` | the `cd` (or `cwd`), `MCP_LOG_FILE` |
+| `YOUR_PROJECT` | the repo you are **editing** — the server reads its `mix.lock` to decide which version of a package to answer about | `PROJECT_ROOT` |
+
+⚠️ Pointing `PROJECT_ROOT` at the clone rather than at your own repo is the easy
+mistake, and nothing reports it: version resolution reads *this* project's
+lockfile and answers confidently about the wrong versions.
+
+The exception is working on `local_hex_mcp` itself, where the two directories are
+the same one and `PROJECT_ROOT` may be omitted: with no lockfile configured,
+resolution falls through to the versions loaded in the server's own BEAM, which
+are that project's. The difference is that a mismatch between the index and your
+deps is then *reported* rather than corrected, and `:application.get_key/2` only
+sees started applications where `mix.lock` lists every one.
+
+❇️ `AI_API_KEY` accepts any OpenAI-compatible provider; Mistral is the default.
+Everything else has a working default — `AI_RERANK_MODEL`, `EMBED_BATCH_SIZE` and
+the rest are in [Configuration](#configuration) and only worth setting once
+something misbehaves.
+
+**4. Copy the agent instructions**
+
+➡️ Copy `CLAUDE.md` — or `AGENTS.md`, the same content under the name other assistants read — into that same project. It is what teaches the assistant that `package` is required, that a multi-package question is several calls, and how to read the `notices` field. Without it the tools work but are used badly.
+
+**5. Warm the reranker** *(only if you enable it)*
+
+The cross-encoder is **off by default** — nothing to download, and the setup is one step shorter. If you set `AI_RERANK_MODEL`, booting the app then loads that model (~20-100 MB from HuggingFace depending on which) and compiles it with EXLA. Both are cached afterwards, but on a cold machine they happen inside `Application.start/2` — that is, inside the window your MCP client is waiting for the server to come up. Do it once here, where you can watch it, to avoid a first connection that times out and looks broken:
 
 ```bash
-MIX_ENV=prod mix run -e ":ok"
+AI_RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L4-v2 mix run -e ":ok"
 ```
 
-Booting the app loads `cross-encoder/ms-marco-MiniLM-L-6-v2` (~97 MB from HuggingFace) and compiles it with EXLA. Both are cached afterwards, but on a cold machine they happen inside `Application.start/2` — that is, inside the window your MCP client is waiting for the server to come up. Doing it once here, where you can watch it, avoids a first connection that times out and looks broken.
-
-**4. Point your assistant at it**
-
-Copy `.mcp.example.json` (Claude Code, Cursor) or `.mcp_config.example.json` (Antigravity) into the project you want to *use* the server from, then edit the absolute paths, `AI_API_KEY`, `DATABASE_PATH` and `PROJECT_ROOT`. The next section explains each.
-
-**5. Copy the agent instructions**
-
-Copy `CLAUDE.md` — or `AGENTS.md`, the same content under the name other assistants read — into that same project. It is what teaches the assistant that `package` is required, that a multi-package question is several calls, and how to read the `notices` field. Without it the tools work but are used badly.
-
-> **One server per project.** `DATABASE_PATH` and `PROJECT_ROOT` are per-project settings. Only one version per package is kept, so two projects sharing a database evict each other's docs and re-embed on every switch.
+See [Search engine](#search-engine) for why it is off, and why leaving it off is the recommendation for an LLM client.
 
 ### AI Code Assistant Configuration
 
@@ -107,14 +146,14 @@ Copy `CLAUDE.md` — or `AGENTS.md`, the same content under the name other assis
       "command": "sh",
       "args": [
         "-c",
-        "cd /absolute/path/to/local_hex_mcp && exec /opt/homebrew/bin/mix mcp.server --no-compile"
+        "cd <MCP_CLONE> && exec /opt/homebrew/bin/mix mcp.server --no-compile"
       ],
       "env": {
         "MIX_ENV": "prod",
-        "AI_API_KEY": "your-key-here",
+        "AI_API_KEY": "<your-key-here>",
+        "MCP_LOG_FILE": "<MCP_CLONE>/tmp_logs.txt",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db",
-        "PROJECT_ROOT": "/absolute/path/to/the/repo/you/are/editing"
+        "PROJECT_ROOT": "[/absolute/path/to/the/repo/you/are/editing]"
       }
     }
   }
@@ -135,13 +174,91 @@ Copy `CLAUDE.md` — or `AGENTS.md`, the same content under the name other assis
         "MIX_QUIET": "1",
         "AI_API_KEY": "your-key-here",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db",
         "PROJECT_ROOT": "/absolute/path/to/the/repo/you/are/editing"
       }
     }
   }
 }
 ```
+
+### Local embeddings
+
+`AI_API_URL` addresses both `/embeddings` and `/chat/completions`, which assumes
+one provider serves both. A local embedding server does not: it has no chat
+route, so pointing `AI_API_URL` at it leaves `remember`'s curation calling a URL
+that 404s — and `memory_enabled?/0` only checks that a key and a model name are
+set, so it attempts the call rather than degrading. `AI_EMBED_URL` and
+`AI_CHAT_URL` override the shared value independently; both default to it, so a
+single provider still needs no extra configuration.
+
+[`text-embeddings-inference`](https://huggingface.co/docs/text-embeddings-inference)
+is in homebrew-core and exposes an OpenAI-compatible `/v1/embeddings`:
+
+```bash
+brew install text-embeddings-inference     # formula name
+text-embeddings-router --model-id Qwen/Qwen3-Embedding-0.6B --port 8081
+```
+
+The binary is `text-embeddings-router`, not the formula name. First run downloads
+the weights and does a warmup pass, both slow and both one-time.
+
+```json
+"AI_EMBED_URL": "http://localhost:8081/v1",
+"AI_EMBED_MODEL": "Qwen/Qwen3-Embedding-0.6B",
+"AI_API_KEY": "-",
+"EMBED_BATCH_SIZE": "32",
+"EMBED_CONCURRENCY": "1",
+"EMBED_PAUSE_MS": "0"
+```
+
+**`EMBED_BATCH_SIZE` must not exceed TEI's `max_client_batch_size`** (32 by
+default, printed at startup). Oversized batches are rejected, and the automatic
+bisection will not rescue them: `token_overflow?/1` recognises the *provider's*
+token-limit shape, and a client-batch-size rejection is a different error, so the
+ingest aborts instead of halving. Match the two numbers.
+
+`AI_API_KEY` only has to be non-empty; it is sent as a bearer token the local
+server ignores. Chat keeps going to whatever `AI_API_URL` names, so `remember`
+and `recall` are unaffected.
+
+Three things to expect:
+
+- **Switching embedders costs a full re-index**, and is refused until you run
+  one. `embedding_config` compares the *model name*, not the dimension, which
+  matters here: Qwen3-Embedding-0.6B is 1024-dim exactly like `mistral-embed`, so
+  nothing would raise and cosine would simply return noise. `mix docs.reindex` is
+  the supported path.
+- **The first ingest of a large package will not finish inside one tool call.**
+  That is the designed path, not a failure: the payload carries a
+  "still being indexed" notice, the job keeps running, and calling `search_docs`
+  again attaches to it. Drop `refresh: true` from the retry.
+- **Lower `EMBED_CONCURRENCY`, do not raise it, and do *not* set
+  `EMBED_PAUSE_MS` to zero.** Against a hosted provider the work is IO-bound and
+  concurrency hides latency; against a local server the server *is* the
+  bottleneck, so parallel requests only contend. `1` is the sensible value.
+
+  The pause is the subtler one. There is no rate limit to pace against, but TEI
+  processes sequentially on CPU whatever `max_concurrent_requests` claims, so
+  **during an ingest every search's query embedding queues behind the ingest
+  batches**. Measured on an M-series CPU with Qwen3-Embedding-0.6B: a 32-document
+  batch takes 8-17s of inference, and a query issued behind one waited 8.4s,
+  12.8s and 17.4s in `queue_time` for 48ms of its own compute. Long enough to
+  exceed the MCP transport's 30s ceiling. `EMBED_PAUSE_MS` around `200` yields
+  slots between batches so interactive searches get through; against a hosted
+  provider, where requests genuinely run in parallel, `0` remains right.
+
+Measured throughput on an M-series CPU (no Metal in the homebrew bottle):
+**~244 tokens/s**, so a 32-document batch is 8-17s and a full 3967-chunk reindex
+runs 25-30 minutes. That is a one-off, and it is the ingest side. **A single
+query embedding is ~48ms of inference**, comparable to a round trip to a hosted
+provider — search latency is not the thing to worry about here, contention is.
+
+Whether it is any *good* is measurable rather than arguable, and this is the
+argument for trying it: re-embedding locally is free, so `mix docs.eval` can
+compare embedders the way it compared rerankers. The vector arm carries
+conceptual retrieval (concept recall 0.94 against FTS's 0.88) and concept MRR at
+0.65 is the weakest number in the table — the one axis never yet swept, because
+until now every attempt cost API spend.
 
 ### Ingestion tuning
 
@@ -158,13 +275,13 @@ Everything else the server reads:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `AI_API_KEY` | — | Required. `AI_API_URL` points at any OpenAI-compatible provider. |
-| `DATABASE_PATH` | config | Per project. Two projects sharing one file evict each other. |
-| `PROJECT_ROOT` | unset | The repo being edited. Its `mix.lock` then decides versions — see below. |
+| $${\color{blue}\text{AI\_API\_KEY}}$$ | — | Required. `AI_API_URL` points at any OpenAI-compatible provider. |
+| $${\color{blue}\text{PROJECT\_ROOT}}$$ | unset | Required. The repo being edited — **not** this clone. |
+| DATABASE_PATH | `<this repo>/priv/mcp.db` | Leave it unset. The default is absolute and compiled in, so `mix setup` and the server agree by construction. Set it — in both places — only to give a project its own index. |
 | `AI_EMBED_MODEL` | `mistral-embed` | Changing it invalidates the whole index; `mix docs.reindex` is the supported path. |
 | `AI_CHAT_MODEL_SMALL` / `_LARGE` | `mistral-small-latest` / `mistral-medium-latest` | Structuring and curation for `remember`. |
-| `AI_RERANK_MODEL` | `cross-encoder/ms-marco-MiniLM-L-6-v2` | Must be an architecture Bumblebee implements with a sequence-classification head. |
-| `AI_RERANK_STRATEGY` | `fused` | `fused`, `pure` or `gated` — how much authority the cross-encoder has over retrieval order. |
+| `AI_RERANK_MODEL` | unset | **Unset means no reranking** and no model is loaded at all. Set it to enable the stage; must be an architecture Bumblebee implements with a sequence-classification head. `cross-encoder/ms-marco-MiniLM-L4-v2` if you want one. A name that does not load logs an error and starts without reranking rather than failing to boot. |
+| `AI_RERANK_STRATEGY` | `fused` | `fused`, `pure` or `gated` — how much authority the cross-encoder has over retrieval order. Ignored when `AI_RERANK_MODEL` is unset. |
 | `GITHUB_TOKEN` | unset | Raises the rate limit for `search_github_issues`. |
 | `MCP_LOG_FILE` / `MCP_LOG_LEVEL` | unset / `warning` | The only way to see anything: stderr is discarded by the client. |
 
@@ -338,9 +455,9 @@ concurrently is a reliable way to collect 429s.
 
 ## Search engine
 
-A query runs three stages: two retrieval arms in parallel, reciprocal rank
-fusion, then a cross-encoder whose verdict is fused *back* against the retrieval
-order rather than replacing it. Roughly 400ms end to end.
+A query runs two stages: two retrieval arms in parallel, then reciprocal rank
+fusion. Roughly 30ms end to end once the query embedding returns. A third stage,
+a cross-encoder, is available and **off by default** — see below for why.
 
 ```mermaid
 flowchart LR
@@ -352,11 +469,12 @@ flowchart LR
     FTS --> RRF1{{"RRF k=60<br/>pool of 10"}}
     VEC --> RRF1
 
-    RRF1 -->|10 pairs| CE["cross-encoder<br/>512 tokens · 390ms"]
-    CE -->|scored order| RRF2{{"RRF<br/>bounded rerank"}}
-    RRF1 -->|retrieval order| RRF2
+    RRF1 --> OUT([top 10 + notices])
 
-    RRF2 --> OUT([top 5 + notices])
+    RRF1 -.->|only if AI_RERANK_MODEL| CE["cross-encoder<br/>512 tokens · +265ms"]
+    RRF1 -.-> RRF2
+    CE -.->|scored order| RRF2{{"RRF<br/>bounded rerank"}}
+    RRF2 -.-> OUT
 
     classDef lex stroke:#b3600f,stroke-width:2px
     classDef vecc stroke:#2b6d85,stroke-width:2px
@@ -364,10 +482,60 @@ flowchart LR
     class VEC vecc
 ```
 
-**Fusion happens twice.** The first pass unions the two arms — a *union*, not an
-intersection, so a document the keyword arm never matched can still be returned.
-The second pass fuses the cross-encoder's ordering with the one retrieval
-produced, so the model can move a document but not overrule the search outright.
+**The fusion is where the retrieval quality comes from.** It unions the two arms
+— a *union*, not an intersection, so a document the keyword arm never matched can
+still be returned. Measured on the 28-query set, that union is worth 0.07 of
+recall@10 over either arm alone, because the arms fail differently:
+
+```
+28 queries · corpus 11 packages / 3891 rows
+
+                       recall@10   MRR@10   candidate   ms
+FTS alone                 0.93      0.67       0.93       4
+vector alone              0.93      0.75       1.00      37
+RRF over both             1.00      0.75       1.00      28
+```
+
+The corpus fingerprint is printed with every run and is part of the result:
+FTS5's `bm25()` uses collection-wide statistics, so indexing *any* package shifts
+the keyword ranking of queries in every other one. A table built on a different
+corpus is not a valid comparison.
+
+### Why the cross-encoder is off
+
+It never adds recall. RRF's candidate recall is already 1.00, so the stage can
+only reorder a pool that already contains the answer — and with `limit` at 10 and
+a rerank depth of 10, it reorders exactly the set that is returned. It cannot add
+or remove a document.
+
+That matters because of who reads the output. `search_docs` answers an LLM that
+reads every row before replying, so it ranks the payload itself; rank *within* the
+payload is close to worthless, while a document that never arrives cannot be
+recovered without a second round trip. Those are the two columns the stage trades
+between:
+
+```
+                                recall   MRR    ms
+RRF, top 10, no reranker          1.00   0.76    46
+RRF, top 5,  no reranker          0.96   0.76    44
+RRF, top 5  + MiniLM-L4           0.96   0.81   294
+RRF, top 5  + TinyBERT-L2         0.93   0.81    69
+```
+
+Returning ten unranked beats reranking five on the axis that survives the
+consumer, at a sixth of the latency, and skipping it removes a HuggingFace
+download and an EXLA compile from `Application.start/2`.
+
+Set `AI_RERANK_MODEL` to turn it back on — a client that reads only the first
+result wants it, and it is worth +0.05 MRR when rank does matter. `MiniLM-L4-v2`
+is the one to pick: it matches larger models on every measured number, and unlike
+`TinyBERT-L2-v2` it does not drop a query.
+
+### What the cross-encoder does when enabled
+
+**Fusion then happens twice.** The second pass fuses the cross-encoder's ordering
+with the one retrieval produced, so the model can move a document but not
+overrule the search outright.
 
 Concretely, the second fusion is **rank averaging**: both inputs hold the same
 ten documents, so each contributes `1/(60 + rank)` twice and the result orders by
@@ -413,11 +581,13 @@ the query set is large enough to test it.
 7. **Fuse to ten** — each arm contributes `1/(60 + rank)`; an absent document
    contributes nothing.
 8. **Hydrate in fused order** — `id IN (…)` returns storage order, so the ranking
-   is reimposed before the reranker sees it.
-9. **Rerank** — the cross-encoder reads each query/document pair together and
-   emits one relevance logit; the result is fused with step 7's order.
-10. **Return five.** The pool is ten; returning all of it hands back exactly the
-    tail the reranker just demoted.
+   is reimposed afterwards.
+9. **Rerank, if enabled** — with `AI_RERANK_MODEL` set, the cross-encoder reads
+   each query/document pair together and emits one relevance logit; the result is
+   fused with step 7's order. Skipped entirely otherwise, and `Reranker.rerank/2`
+   returns the fused order untouched when the serving is not running.
+10. **Return ten** — the whole pool. Cutting to five drops a document the arms
+    did find (recall 0.96 against 1.00), and the consumer reads every row anyway.
 
 ### Ingestion
 
