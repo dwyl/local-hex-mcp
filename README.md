@@ -2,6 +2,8 @@
 
 A lightweight Elixir MCP server designed to run over `stdio` with a local SQLite database and an `AI_API_KEY`.
 
+> Why not just `grep deps/`? Because docs are generated from compiled modules, they show the API a macro produced — `grep` for `parse_options!/1` in `anubis_mcp` matches nothing, though it is called two lines below the `defschema` that makes it. And `grep` ranks nothing: it cannot connect "how do I avoid re-embedding" to the docs that say `chunk_overlap`.
+
 - `search_docs`: ask a question about an Elixir package; the tool answers from the local index, or downloads and digests the package first if it is not indexed yet. A first-time ingestion of a large package may exceed one tool call — the payload then reports progress and the job continues in the background.
 - `list_indexed_packages`: what is indexed, at which version, whether it is complete, and how that compares to the version this project depends on.
 - `remember`: save one or more learnings — takes a list, so a whole session's lessons go in a single call. AI assisted curation runs in the background and may merge, append to or discard what you send.
