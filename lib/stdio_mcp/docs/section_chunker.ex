@@ -99,10 +99,13 @@ defmodule StdioMcp.Docs.SectionChunker do
   # those and splitting there produces fragments too small to stand alone.
   @section_level 3
 
-  # Chosen against the reranker, which is the tightest consumer: at
-  # `sequence_length: 512` a cross-encoder pair is roughly 2000 characters, so a
-  # chunk beyond that is scored on its opening only. The embedding model's 8k
-  # window is not the binding constraint.
+  # The embedding model's 8k window is not the binding constraint — readability
+  # in the payload is. A chunk much beyond this stops being a section and starts
+  # being a page, and the whole pool of ten is returned to the caller.
+  #
+  # It was originally chosen against a cross-encoder reranker, whose 512-token
+  # pair is roughly 2000 characters; that stage has since been removed, but the
+  # size measured well and is kept.
   @default_max_bytes 1600
 
   # Below this a chunk is a heading and a sentence — it dilutes the index without

@@ -14,7 +14,6 @@ A lightweight Elixir MCP server designed to run over `stdio` with a local SQLite
 - `SQLite` + FTS5 + `sqlite-vec`
 - `anubis_mcp`: Compatible with Claude Code, Cursor, and Google Antigravity CLI (`agy`).
 - `MDEx` for markdown (parsing and source positions — never rendering), `lazy_html` (Lexbor) for HTML extraction and per-function source links
-- `Bumblebee` for the optional cross-encoding reranker (off by default)
 - Cloud AI models (embeddings, chat-small, chat-medium).
 
 >[!IMPORTANT]
@@ -30,7 +29,7 @@ A lightweight Elixir MCP server designed to run over `stdio` with a local SQLite
 
 ## Features
 
-- **Hybrid search**: FTS5 and `vec_distance_cosine` retrieve in parallel, reciprocal rank fusion merges them, and an optional cross-encoder reranks. ~30ms; recall@10 is 1.00 on the eval set without the reranker, which is why it ships off.
+- **Hybrid search**: FTS5 and `vec_distance_cosine` retrieve in parallel, reciprocal rank fusion merges them. ~30ms; recall@10 is 1.00 on the eval set, which is why nothing ranks the pool afterwards.
 - **Curated knowledge memory**: submissions are embedded, compared to their nearest neighbours, and only then passed to a chat model that chooses `create`, `append`, `merge`, `replace`, `deprecate` or `discard`. `recall` uses the same hybrid retrieval as `search_docs` — FTS5 and cosine fused by RRF — and degrades to keyword-only when no embedding is available, so it still works with no API key.
 - **HexDocs ingestion**: fetches a package's docs tarball from Hex, extracts it in memory, and indexes it with embeddings on demand. One HTTP request per package, never a page-by-page crawl.
 - **Version-aware**: with `PROJECT_ROOT` set, `latest` resolves to whatever your project's `mix.lock` pins — any age, pre-releases included — falling back to Hex's latest stable when nothing local pins the package. One version per package is kept, so results never interleave versions.
@@ -117,23 +116,13 @@ deps is then *reported* rather than corrected, and `:application.get_key/2` only
 sees started applications where `mix.lock` lists every one.
 
 ❇️ `AI_API_KEY` accepts any OpenAI-compatible provider; Mistral is the default.
-Everything else has a working default — `AI_RERANK_MODEL`, `EMBED_BATCH_SIZE` and
+Everything else has a working default — `EMBED_BATCH_SIZE` and
 the rest are in [Configuration](#configuration) and only worth setting once
 something misbehaves.
 
 **4. Copy the agent instructions**
 
 ➡️ Copy `CLAUDE.md` — or `AGENTS.md`, the same content under the name other assistants read — into that same project. It is what teaches the assistant that `package` is required, that a multi-package question is several calls, and how to read the `notices` field. Without it the tools work but are used badly.
-
-**5. Warm the reranker** *(only if you enable it)*
-
-The cross-encoder is **off by default** — nothing to download, and the setup is one step shorter. If you set `AI_RERANK_MODEL`, booting the app then loads that model (~20-100 MB from HuggingFace depending on which) and compiles it with EXLA. Both are cached afterwards, but on a cold machine they happen inside `Application.start/2` — that is, inside the window your MCP client is waiting for the server to come up. Do it once here, where you can watch it, to avoid a first connection that times out and looks broken:
-
-```bash
-AI_RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L4-v2 mix run -e ":ok"
-```
-
-See [Search engine](#search-engine) for why it is off, and why leaving it off is the recommendation for an LLM client.
 
 ### AI Code Assistant Configuration
 
@@ -255,7 +244,7 @@ provider — search latency is not the thing to worry about here, contention is.
 
 Whether it is any *good* is measurable rather than arguable, and this is the
 argument for trying it: re-embedding locally is free, so `mix docs.eval` can
-compare embedders the way it compared rerankers. The vector arm carries
+compare embedders the way it compared retrieval strategies. The vector arm carries
 conceptual retrieval (concept recall 0.94 against FTS's 0.88) and concept MRR at
 0.65 is the weakest number in the table — the one axis never yet swept, because
 until now every attempt cost API spend.
@@ -280,8 +269,6 @@ Everything else the server reads:
 | DATABASE_PATH | `<this repo>/priv/mcp.db` | Leave it unset. The default is absolute and compiled in, so `mix setup` and the server agree by construction. Set it — in both places — only to give a project its own index. |
 | `AI_EMBED_MODEL` | `mistral-embed` | Changing it invalidates the whole index; `mix docs.reindex` is the supported path. |
 | `AI_CHAT_MODEL_SMALL` / `_LARGE` | `mistral-small-latest` / `mistral-medium-latest` | Structuring and curation for `remember`. |
-| `AI_RERANK_MODEL` | unset | **Unset means no reranking** and no model is loaded at all. Set it to enable the stage; must be an architecture Bumblebee implements with a sequence-classification head. `cross-encoder/ms-marco-MiniLM-L4-v2` if you want one. A name that does not load logs an error and starts without reranking rather than failing to boot. |
-| `AI_RERANK_STRATEGY` | `fused` | `fused`, `pure` or `gated` — how much authority the cross-encoder has over retrieval order. Ignored when `AI_RERANK_MODEL` is unset. |
 | `GITHUB_TOKEN` | unset | Raises the rate limit for `search_github_issues`. |
 | `MCP_LOG_FILE` / `MCP_LOG_LEVEL` | unset / `warning` | The only way to see anything: stderr is discarded by the client. |
 
@@ -456,8 +443,8 @@ concurrently is a reliable way to collect 429s.
 ## Search engine
 
 A query runs two stages: two retrieval arms in parallel, then reciprocal rank
-fusion. Roughly 30ms end to end once the query embedding returns. A third stage,
-a cross-encoder, is available and **off by default** — see below for why.
+fusion. Roughly 30ms end to end once the query embedding returns. Nothing ranks
+the pool after fusion — see below for why there is no reranker.
 
 ```mermaid
 flowchart LR
@@ -470,11 +457,6 @@ flowchart LR
     VEC --> RRF1
 
     RRF1 --> OUT([top 10 + notices])
-
-    RRF1 -.->|only if AI_RERANK_MODEL| CE["cross-encoder<br/>512 tokens · +265ms"]
-    RRF1 -.-> RRF2
-    CE -.->|scored order| RRF2{{"RRF<br/>bounded rerank"}}
-    RRF2 -.-> OUT
 
     classDef lex stroke:#b3600f,stroke-width:2px
     classDef vecc stroke:#2b6d85,stroke-width:2px
@@ -501,63 +483,43 @@ FTS5's `bm25()` uses collection-wide statistics, so indexing *any* package shift
 the keyword ranking of queries in every other one. A table built on a different
 corpus is not a valid comparison.
 
-### Why the cross-encoder is off
+### Why there is no reranker
+
+A cross-encoder reranking stage was built, measured against the 28-query eval,
+and removed. The measurement is why.
 
 It never adds recall. RRF's candidate recall is already 1.00, so the stage can
 only reorder a pool that already contains the answer — and with `limit` at 10 and
-a rerank depth of 10, it reorders exactly the set that is returned. It cannot add
-or remove a document.
+a pool of 10, it reorders exactly the set that is returned. It cannot add or
+remove a document. Measured end to end with `MiniLM-L4-v2`, top-5, 3891 rows:
 
-That matters because of who reads the output. `search_docs` answers an LLM that
+```
+slice          rrf                  rrf+rerank           rerank stage
+all (28)       0.96  MRR 0.75       0.96  MRR 0.78          +61ms
+concept (16)   0.94  MRR 0.63       0.94  MRR 0.62          +63ms
+symbol (12)    1.00  MRR 0.92       1.00  MRR 1.00          +63ms
+```
+
+`recall@5` is identical in every slice. The headline +0.03 MRR is an average over
+two opposite effects: symbol queries saturate at rank 1, conceptual queries gain
+nothing. So the stage polishes the class that already worked and leaves the weak
+class untouched — the opposite of the usual intuition about cross-encoders.
+
+That interacts badly with who reads the output. `search_docs` answers an LLM that
 reads every row before replying, so it ranks the payload itself; rank *within* the
 payload is close to worthless, while a document that never arrives cannot be
-recovered without a second round trip. Those are the two columns the stage trades
-between:
+recovered without a second round trip. The stage buys the column that does not
+matter here, and cannot move the one that does.
 
-```
-                                recall   MRR    ms
-RRF, top 10, no reranker          1.00   0.76    46
-RRF, top 5,  no reranker          0.96   0.76    44
-RRF, top 5  + MiniLM-L4           0.96   0.81   294
-RRF, top 5  + TinyBERT-L2         0.93   0.81    69
-```
+Removing it also drops `bumblebee`, `exla` and `emlx` — about 860MB of
+dependencies, a native build, and a HuggingFace download plus model compile
+inside `Application.start/2`, which happened in the window an MCP client waits
+for the server to come up.
 
-Returning ten unranked beats reranking five on the axis that survives the
-consumer, at a sixth of the latency, and skipping it removes a HuggingFace
-download and an EXLA compile from `Application.start/2`.
-
-Set `AI_RERANK_MODEL` to turn it back on — a client that reads only the first
-result wants it, and it is worth +0.05 MRR when rank does matter. `MiniLM-L4-v2`
-is the one to pick: it matches larger models on every measured number, and unlike
-`TinyBERT-L2-v2` it does not drop a query.
-
-### What the cross-encoder does when enabled
-
-**Fusion then happens twice.** The second pass fuses the cross-encoder's ordering
-with the one retrieval produced, so the model can move a document but not
-overrule the search outright.
-
-Concretely, the second fusion is **rank averaging**: both inputs hold the same
-ten documents, so each contributes `1/(60 + rank)` twice and the result orders by
-something very close to the sum of the two ranks. Nothing cleverer than that.
-
-The case it was built for: on `"prevent interception of the authorization code on
-a public client"`, all three retrieval arms put boruta's PKCE guide at rank 1 and
-the cross-encoder dropped it to 8, preferring a typespec that lists
-`pkce: boolean()` among thirty fields. Averaging the two rankings puts it back
-at 2.
-
-**How well this generalises is not established.** Against the 26-query set,
-fusing rather than letting the cross-encoder win outright moves 9 queries: five
-improve, four worsen, and every movement is one rank except the PKCE case that
-motivated the change. Remove that query and the effect is exactly zero. The
-aggregate difference (recall@5 0.92 → 0.96) is one query, and one standard error
-at this sample size is 0.043 — so the number is indistinguishable from noise.
-
-It is kept on the mechanistic argument rather than the measurement: a bi-encoder
-and a cross-encoder fail differently, so averaging their ranks is the standard
-response to two rankers with uncorrelated errors. Treat it as unvalidated until
-the query set is large enough to test it.
+The full sweep — eight models, the `sequence_length` truncation trap, the
+two-pass fusion design and the EMLX/EXLA measurements — is in `Notes.md`. The
+working code is preserved on the **`rerank`** branch, so restoring it is a
+checkout rather than a rewrite.
 
 ### Query, step by step
 
@@ -582,12 +544,8 @@ the query set is large enough to test it.
    contributes nothing.
 8. **Hydrate in fused order** — `id IN (…)` returns storage order, so the ranking
    is reimposed afterwards.
-9. **Rerank, if enabled** — with `AI_RERANK_MODEL` set, the cross-encoder reads
-   each query/document pair together and emits one relevance logit; the result is
-   fused with step 7's order. Skipped entirely otherwise, and `Reranker.rerank/2`
-   returns the fused order untouched when the serving is not running.
-10. **Return ten** — the whole pool. Cutting to five drops a document the arms
-    did find (recall 0.96 against 1.00), and the consumer reads every row anyway.
+9. **Return ten** — the whole pool. Cutting to five drops a document the arms
+   did find (recall 0.96 against 1.00), and the consumer reads every row anyway.
 
 ### Ingestion
 
@@ -635,8 +593,7 @@ are counterintuitive.
 | Setting | Value | Why not more |
 | --- | --- | --- |
 | per-arm depth | 15 | Deeper is **worse**. RRF scores agreement, so at depth 40 an item ranked ~15 by both arms (`1/75 + 1/75`) outscores one ranked 3rd by a single arm (`1/63`), and the strong single-arm hit falls out of the pool. recall@5 drops 1.00 → 0.96 purely by retrieving more. |
-| rerank pool | 10 | Retrieval wants depth; reranking does not. Candidate recall is already 1.00 at ten, so everything beyond is a distractor the model can mis-promote and nothing it can find. |
-| sequence length | 512 | At 128 the pair truncates to ~400 characters. Symbol queries survive — the identifier is in the header — while conceptual answers sit deeper in the chunk and are never seen. Reranking at 128 scored *worse than not reranking at all*. |
+| fused pool | 10 | Candidate recall is already 1.00 at ten, and the whole pool is returned. Everything beyond it is a distractor with nothing to gain. |
 
 Two properties worth knowing before trusting a measurement:
 
@@ -645,10 +602,6 @@ Two properties worth knowing before trusting a measurement:
   — measured, 53 new rows moved the keyword arm by 0.04 with nothing else
   touched. Vector search is immune. A control table is only valid for the corpus
   that produced it, which is why the report prints a corpus fingerprint.
-- **Bigger rerankers are not better here.** `bge-reranker-base` (278M) scores
-  0.78 MRR against MiniLM-L-6's 0.79 and is five times slower;
-  `ms-marco-MiniLM-L-12-v2` loses two queries outright. Selectable via
-  `AI_RERANK_MODEL`.
 
 ### When a stage fails
 
@@ -674,13 +627,12 @@ at all, and is the ceiling on everything downstream.
 | vector only | 0.88 | 0.76 | 1.00 | 32 |
 | intersection (previous design) | 0.92 | 0.79 | 0.96 | 31 |
 | fusion | 0.92 | 0.76 | 1.00 | 28 |
-| **fusion + bounded rerank** | **0.96** | **0.79** | **1.00** | **398** |
+| **fusion** (current) | **0.96** | **0.75** | **1.00** | **29** |
 
-Split by query shape the last row reads very differently: `1.00 / 1.00` on bare
-identifiers, `0.93 / 0.60` on conceptual questions. The reranker pulls
-conceptual answers *into* the top five that retrieval missed, while ordering them
-worse than plain retrieval does. Bounding its authority recovered the recall; the
-ordering gap is the open problem.
+Split by query shape the last row reads very differently: `1.00 / 0.92` on bare
+identifiers, `0.94 / 0.63` on conceptual questions. Conceptual ordering is the
+open problem, and a cross-encoder does not fix it — see "Why there is no
+reranker" above.
 
 Reproduce with `AI_API_KEY=... mix docs.eval --verbose`. A change that does not
 move these numbers did not work, whatever it looked like in a spot check.
@@ -702,15 +654,15 @@ What justifies spending latency is that cost compounds through **retries**, not
 through the call. If the tool answers, the agent moves on; if it does not, the
 agent reformulates — a second tool call plus a whole extra model turn. A 400ms
 call that answers is much cheaper than a 50ms call that forces a second turn.
-Against that, the reranker's 390ms buys recall@5 from 0.92 to 0.96: one query in
-26 that no longer needs a retry. If a retry costs ~3s of model turn, it pays for
-itself above roughly a 4% retry-avoidance rate, and 0.04 is what was measured.
+That is the argument that would justify a reranker, and it is why one was built.
+It failed on the premise rather than the arithmetic: the stage buys no recall at
+all, so there is no retry it avoids — only ordering, which this consumer discards.
 
 The operating rule, then, is close to the opposite of "keep it snappy": **spend
 the median freely up to the wall when it buys correctness, and protect the tail
 absolutely.** Concurrency is not a factor, and not for the reason you might
 expect: an Anubis session holds one request in flight and queues the rest, so
-parallel tool calls are serialised before they ever reach the reranker. What that
+parallel tool calls are serialised before they ever reach the search. What that
 does mean is that a slow request consumes the timeout budget of everything queued
 behind it — see "One call at a time" below.
 

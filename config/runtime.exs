@@ -49,9 +49,6 @@ config :stdio_mcp,
   ai_chat_url: System.get_env("AI_CHAT_URL", api_url),
   ai_api_key: System.get_env("AI_API_KEY"),
   ai_embed_model: System.get_env("AI_EMBED_MODEL", "mistral-embed"),
-  # No default, and nil means the cross-encoder is not loaded at all. See
-  # `StdioMcp.Application.reranker_children/0` for why off is the default.
-  ai_rerank_model: System.get_env("AI_RERANK_MODEL"),
   ai_chat_model_small: System.get_env("AI_CHAT_MODEL_SMALL", "mistral-small-latest"),
   ai_chat_model_large: System.get_env("AI_CHAT_MODEL_LARGE", "mistral-large-latest"),
   github_api_url: System.get_env("GITHUB_API_URL", "https://api.github.com"),

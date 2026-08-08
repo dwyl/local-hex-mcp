@@ -120,23 +120,22 @@ Two stages, roughly 30ms end to end once the query embedding returns:
    worse, not better: RRF rewards agreement, so 40-deep arms let
    mediocre-but-agreed rows displace a strong single-arm hit.
 
-A third stage, **cross-encoder rerank** of those 10, exists but is **off unless
-`AI_RERANK_MODEL` is set** — no model is loaded otherwise. It never adds recall
-(candidate recall is already 1.00), and at a pool of 10 returned whole it cannot
-add or remove a document at all, only reorder one you will read in full either
-way. Enabling it costs ~265ms and buys ~0.05 MRR.
+There is no third stage. A cross-encoder reranker was built and removed: it never
+added recall (candidate recall is already 1.00) and at a pool of 10 returned whole
+it could not add or remove a document at all, only reorder rows you read in full
+either way. See `Notes.md`, or the `rerank` branch for the code.
 
 **All ten rows come back, and the tail is unranked by any model.** Expect the
 last few to include changelog entries and loosely related functions — that is the
-accepted cost of not letting a small model expel a good row from the top five.
-Read the whole payload rather than trusting position.
+accepted cost of returning the whole pool. Read the payload rather than trusting
+position.
 
-Every stage degrades rather than fails: no embedding gives FTS-only, no reranker
-gives fused order, no keyword match gives vector-only.
+Every stage degrades rather than fails: no embedding gives FTS-only, no keyword
+match gives vector-only.
 
 `mix docs.eval` measures all of it against a fixed 28-query set with ground truth
 resolved from the database. Run it before and after any change to chunking,
-tokenisation, fusion or reranking — `Notes.md` holds the control tables and the
+tokenisation or fusion — `Notes.md` holds the control tables and the
 history of what moved them.
 
 ### The index is single-model

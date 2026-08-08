@@ -28,21 +28,23 @@ defmodule StdioMcp.Docs.Fusion do
   """
 
   # 60 is the constant from the original RRF paper, where the job is fusing large
-  # candidate sets produced by independent systems. For *that* fusion — the two
-  # retrieval arms — it is the right default and barely matters, since the
-  # ordering it produces is rescored downstream and only membership survives.
+  # candidate sets produced by independent systems. That is exactly this fusion's
+  # job — the two retrieval arms — and nothing reorders the result afterwards, so
+  # the order this produces is the order the caller reads.
   #
-  # It is not the right default everywhere. `Docs.Reranker` fuses two permutations
-  # of the *same* ten items, and there `k` stops being a smoothing constant and
-  # becomes the dial controlling how much authority the cross-encoder has:
+  # `k` is a dial, not a constant, and every caller currently leaves it alone. It
+  # earned the parameter when a second caller fused two permutations of the *same*
+  # ten items (a cross-encoder's ordering against retrieval's, since removed — see
+  # `Notes.md`). Over ten items it controls how far apart the scores spread:
   #
   #     k      best/worst score ratio over 10 items
-  #     0      10.00x   reranker ordering dominates
+  #     0      10.00x   first input dominates
   #     10      1.82x
   #     60      1.15x   near pure rank-averaging
   #
-  # At 60 every score sits within 15% of every other, so the fusion barely nudges.
-  # That is why `rrf/3` exists: the caller that needs a different balance says so.
+  # At 60 every score sits within 15% of every other, so fusing two orderings of
+  # one set barely nudges it. Kept because the analysis is the hard part to
+  # recover, and a future second ranker would need the same dial.
   @default_k 60
 
   @doc """

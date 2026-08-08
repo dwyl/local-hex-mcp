@@ -1,13 +1,13 @@
 defmodule Mix.Tasks.Docs.Eval do
-  @shortdoc "Measures retrieval quality across FTS / vector / hybrid / RRF / rerank."
+  @shortdoc "Measures retrieval quality across FTS / vector / hybrid / RRF."
 
   @moduledoc """
   Retrieval eval harness for `search_docs`.
 
   Runs a fixed query set against the packages already in the local index and
   reports, per retrieval strategy, how often the right documentation chunk makes
-  it into the answer. It exists so that changes to chunking, tokenisation, fusion
-  and reranking can be judged by a number rather than by reading five results and
+  it into the answer. It exists so that changes to chunking, tokenisation and
+  fusion can be judged by a number rather than by reading five results and
   forming an impression.
 
   ## Why this is a standalone instrument
@@ -42,41 +42,35 @@ defmodule Mix.Tasks.Docs.Eval do
       the headline: 5 is roughly what fits in an agent's answer.
     * `MRR@10` — mean reciprocal rank of the first relevant chunk. Moves when
       ordering improves even if recall does not.
-    * `cand` — fraction of queries whose candidate pool (before reranking)
-      contained a relevant chunk. **This is the ceiling on `rrf+rerank`.** A
-      reranker cannot promote what retrieval never fetched, so if `cand` is 0.80,
-      no reranking work will take `recall@5` past 0.80. Fix recall first.
+    * `cand` — fraction of queries whose candidate pool contained a relevant
+      chunk. It is the ceiling on `recall@5`: no ordering change can promote what
+      retrieval never fetched, so if `cand` is 0.80, nothing downstream takes
+      `recall@5` past 0.80. Fix recall first.
     * `ms` — median wall clock, including the embedding API call for every mode
       that needs a vector (the embedding is fetched once per query and shared, so
       the modes are comparable to each other, not to a cold production call).
 
   The `concept` / `symbol` split is the whole reason for the query set's shape.
-  A cross-encoder trained on MS MARCO is at home on natural-language questions
-  and out of distribution on bare identifiers; an aggregate number averages those
-  two regimes together and hides the case where reranking makes things worse.
+  The two regimes behave differently — keyword retrieval is near-perfect on bare
+  identifiers and weakest on natural-language questions — and an aggregate number
+  averages them together, hiding a change that helps one and harms the other.
 
   ## Usage
 
       mix docs.eval
       mix docs.eval --only symbol
       mix docs.eval --modes fts,rrf --verbose
-      mix docs.eval --no-rerank --candidates 60
+      mix docs.eval --candidates 60
 
   ## Options
 
     * `--modes` — comma-separated subset of `fts,vector,hybrid,rrf` (default: all)
-    * `--no-rerank` — skip the cross-encoder stage
     * `--only` — `concept` or `symbol`; default runs both
     * `--candidates` — per-arm retrieval depth (default 15). Deeper is **worse**
       here: RRF scores consensus, so with 40-deep arms an item ranked ~15 by both
       arms (1/75 + 1/75) outscores one ranked 3 by a single arm (1/63), and the
       strong single-arm hit falls out of the fused top 10. Measured: arms 10 and
       15 both give 1.00 recall@5, arms 20 gives 0.96.
-    * `--rerank-depth` — how many fused candidates reach the cross-encoder
-      (default 10). Retrieval wants depth; reranking does not. Measured on this
-      set: reranking RRF's top 10 scores **1.00** recall@5, top 20 and top 40 both
-      score 0.96. RRF's `cand` is already 1.00 at depth 10, so everything past it
-      is a distractor the cross-encoder can mis-promote and nothing it can find.
     * `--limit` — cut-off for recall@k (default 5)
     * `--verbose` — per-query rank table
     * `--judged` — score against `priv/eval/judgements.md` instead of the
@@ -98,12 +92,10 @@ defmodule Mix.Tasks.Docs.Eval do
   alias StdioMcp.Docs.Fusion
   alias StdioMcp.Docs.Judgements
   alias StdioMcp.Docs.QuerySanitizer
-  alias StdioMcp.Docs.Reranker
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
 
   @mrr_depth 10
-  @rerank_serving Rerank
 
   # 13 conceptual + 12 symbol. Conceptual queries deliberately avoid naming the
   # identifier they should find — that is the whole test. Symbol queries are the
@@ -346,10 +338,8 @@ defmodule Mix.Tasks.Docs.Eval do
       OptionParser.parse(argv,
         strict: [
           modes: :string,
-          rerank: :boolean,
           only: :string,
           candidates: :integer,
-          rerank_depth: :integer,
           limit: :integer,
           verbose: :boolean,
           show: :integer,
@@ -361,9 +351,7 @@ defmodule Mix.Tasks.Docs.Eval do
 
     config = %{
       modes: modes(opts),
-      rerank?: Keyword.get(opts, :rerank, true) and serving_up?(),
       candidates: Keyword.get(opts, :candidates, 15),
-      rerank_depth: Keyword.get(opts, :rerank_depth, 10),
       limit: Keyword.get(opts, :limit, 5),
       verbose?: Keyword.get(opts, :verbose, false),
       show: Keyword.get(opts, :show, 0),
@@ -381,9 +369,6 @@ defmodule Mix.Tasks.Docs.Eval do
         Mix.shell().error("No usable queries. Nothing to measure.")
 
       usable ->
-        if Keyword.get(opts, :rerank, true) and not config.rerank?,
-          do: Mix.shell().info("#{@rerank_serving} serving is not running — skipping rerank.\n")
-
         usable
         |> Enum.map(&evaluate(&1, config))
         |> report(config)
@@ -550,16 +535,6 @@ defmodule Mix.Tasks.Docs.Eval do
         {mode, %{ids: ids, us: us}}
       end)
 
-    runs =
-      if config.rerank? and :rrf in config.modes do
-        %{ids: fused, us: fused_us} = runs.rrf
-        pool = Enum.take(fused, config.rerank_depth)
-        {us, ids} = :timer.tc(fn -> rerank(q.query, pool) end)
-        Map.put(runs, :"rrf+rerank", %{ids: ids, us: fused_us + us})
-      else
-        runs
-      end
-
     %{query: q, runs: runs}
   end
 
@@ -653,26 +628,18 @@ defmodule Mix.Tasks.Docs.Eval do
     |> Repo.all()
   end
 
-  # Fusion and reranking now come from the modules `Docs.Search` uses. The arms
-  # stay local, because the harness has to compare strategies the server does not
-  # implement — `hybrid` is the intersection RRF replaced, kept as the control —
-  # but reimplementing the two stages that *are* production would let the `rrf`
-  # and `rrf+rerank` rows drift away from describing the server.
+  # Fusion comes from the module `Docs.Search` uses. The arms stay local, because
+  # the harness has to compare strategies the server does not implement —
+  # `hybrid` is the intersection RRF replaced, kept as the control — but
+  # reimplementing the stage that *is* production would let the `rrf` row drift
+  # away from describing the server.
   defp rrf(ranked_lists, n), do: Fusion.rrf(ranked_lists, n)
 
   defp sanitize_fts(query), do: QuerySanitizer.to_match(query)
 
-  # -- reranking ---------------------------------------------------------------
-
-  defp serving_up?, do: Reranker.available?()
-
-  defp rerank(query, ids) do
-    ids |> hydrate() |> Reranker.rerank(query) |> Enum.map(& &1.id)
-  end
-
   # `id in ^ids` returns rows in whatever order SQLite likes, so the fused
-  # ordering has to be reimposed — otherwise the reranker's input order is
-  # arbitrary and any tie it fails to break is decided by the storage engine.
+  # ordering has to be reimposed — otherwise any tie is decided by the storage
+  # engine rather than by the ranking under test.
   defp hydrate(ids) do
     by_id =
       from(d in PackageDoc, where: d.id in ^ids)
@@ -685,11 +652,11 @@ defmodule Mix.Tasks.Docs.Eval do
   # -- reporting ---------------------------------------------------------------
 
   defp report(evaluations, config) do
-    modes = config.modes ++ if(config.rerank?, do: [:"rrf+rerank"], else: [])
+    modes = config.modes
 
     Mix.shell().info("""
 
-    #{length(evaluations)} queries · top-#{config.limit} · #{config.candidates} per arm · rerank top #{config.rerank_depth}
+    #{length(evaluations)} queries · top-#{config.limit} · #{config.candidates} per arm
     corpus #{corpus_fingerprint()}
     """)
 
@@ -744,7 +711,7 @@ defmodule Mix.Tasks.Docs.Eval do
   # frequency and average document length, so ingesting *any* package changes the
   # keyword ranking of queries in *other* packages. Measured — indexing 53 rows
   # of `nimble_options` moved the `fts` arm from 0.92 to 0.88 with nothing else
-  # touched, and the reranked row followed it.
+  # touched, and every fused row followed it.
   #
   # A control table is therefore only valid for the corpus that produced it. This
   # line makes a mismatched comparison visible instead of silently wrong.

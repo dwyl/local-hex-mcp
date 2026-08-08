@@ -10,7 +10,6 @@ defmodule StdioMcp.Docs.Search do
   alias StdioMcp.Docs.RepairBudget
   alias StdioMcp.Docs.TarballIngestion
   alias StdioMcp.Docs.QuerySanitizer
-  alias StdioMcp.Docs.Reranker
   alias StdioMcp.PackageDoc
   alias StdioMcp.Repo
   require Logger
@@ -158,7 +157,7 @@ defmodule StdioMcp.Docs.Search do
 
   defp presence(_value), do: nil
 
-  # Retrieve shallow from both arms, fuse, rerank the fused head.
+  # Retrieve shallow from both arms, then fuse.
   #
   # This replaces an *intersection*: the previous query ordered by cosine and
   # filtered with `d.id in subquery(fts_ids)`, so a document the vector arm
@@ -170,7 +169,7 @@ defmodule StdioMcp.Docs.Search do
   # agreement and deeper arms supply enough mediocre-but-agreed documents to
   # displace a strong single-arm hit. Retrieving *more* is worse here.
   @arm_depth 15
-  @rerank_depth 10
+  @pool_depth 10
 
   @spec run_query(Ecto.Query.t(), String.t(), list() | String.t() | nil, pos_integer()) ::
           {[PackageDoc.t()], notices()}
@@ -180,14 +179,15 @@ defmodule StdioMcp.Docs.Search do
 
     arms = [fts_ids(base_query, match), vector_ids(base_query, vec_param)]
 
-    case Fusion.rrf(arms, max(@rerank_depth, limit)) do
-      # Neither arm returned anything for this package — not an error, and not
-      # something reranking can rescue.
+    case Fusion.rrf(arms, max(@pool_depth, limit)) do
+      # Neither arm returned anything for this package — not an error.
       [] ->
         {[], []}
 
+      # `hydrate/1` re-orders by the id list, so the fused RRF order survives the
+      # round trip to the database. Nothing ranks the pool after this point.
       ids ->
-        {ids |> hydrate() |> Reranker.rerank(query) |> Enum.take(limit), []}
+        {ids |> hydrate() |> Enum.take(limit), []}
     end
   rescue
     e ->
@@ -241,8 +241,8 @@ defmodule StdioMcp.Docs.Search do
   end
 
   # `id in ^ids` returns rows in storage order, so the fused ranking has to be
-  # reimposed — otherwise the reranker receives its input in an arbitrary order
-  # and every tie it cannot break is decided by SQLite.
+  # reimposed — nothing reorders the pool after this point, so SQLite would
+  # otherwise be deciding what the caller reads first.
   defp hydrate(ids) do
     by_id =
       from(d in PackageDoc, where: d.id in ^ids)

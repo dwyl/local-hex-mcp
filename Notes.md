@@ -78,7 +78,14 @@ rare oversized-code-block case and in fact produced three chunks of
 phx.gen.html - Part 1/2` — with no leading code span to harvest. Their opening
 sentences would name them; unimplemented.
 
-## The reranker is optional, and off
+## The reranker was measured, then removed
+
+> **Removed from `main`.** The stage, its dependencies (`bumblebee`, `exla`,
+> `emlx` — ~860MB) and the `rrf+rerank` mode of `mix docs.eval` are gone. The
+> working code is preserved on the **`rerank`** branch; restoring it is a
+> checkout, not a rewrite. Everything below is the evidence that justified the
+> removal, kept because the question "why is there no reranker?" is worth an
+> answer with numbers behind it.
 
 It **never adds recall**. Candidate recall after fusion is already 1.00, so the
 stage only reorders a pool that already holds the answer — and with `limit 10`

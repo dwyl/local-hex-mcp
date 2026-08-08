@@ -62,9 +62,6 @@ defmodule StdioMcp.MixProject do
       {:jason, "~> 1.4"},
       {:lazy_html, "~> 0.1.12"},
       {:mdex, "~> 0.13.5"},
-      {:bumblebee, "~> 0.7.1"},
-      {:exla, "~> 0.13.0"},
-      {:emlx, git: "https://github.com/elixir-nx/emlx", branch: "main", sparse: "emlx"},
       {:dialyxir, "~> 1.4", runtime: false},
       {:credo, "~> 1.7", runtime: false}
     ]

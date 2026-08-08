@@ -110,8 +110,8 @@ defmodule StdioMcp.Tools.SearchDocs do
       embedding: vector,
       # 10, and the fused pool is returned whole. Recall@5 is 0.96 against 1.00 at
       # ten on the 28-query eval: cutting at five drops a document the retrieval
-      # arms did find, and no amount of reranking puts it back — a pool of ten is
-      # what `@rerank_depth` builds anyway, so five was throwing half of it away.
+      # arms did find, and nothing downstream puts it back — a pool of ten is
+      # what fusion builds anyway, so five was throwing half of it away.
       #
       # This used to read "5, not 10", on the observation that the last two or
       # three rows of every search were changelog entries and unrelated functions.
