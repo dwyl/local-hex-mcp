@@ -1,21 +1,21 @@
 {
-  "_comment": "Claude Code / Cursor. Copy to .mcp.json in the repo you want to USE the server from, then replace the two ALL-CAPS placeholders. MCP_CLONE is where you cloned local_hex_mcp; YOUR_PROJECT is the repo you are editing. DATABASE_PATH is deliberately absent: it defaults to <MCP_CLONE>/priv/mcp.db, which is also what 'mix setup' migrates, so one shared database needs no configuration at all. See README 'AI Code Assistant Configuration'.",
+  "_comment": "Claude Code / Cursor. Copy to .mcp.json in the repo you want to USE the server from, then edit the three values marked <…> in the env block — nothing outside it. MCP_CLONE is where you cloned local_hex_mcp; PROJECT_ROOT is the repo you are editing, and pointing it at the clone by mistake answers confidently about the wrong versions. DATABASE_PATH is deliberately absent: it defaults to <MCP_CLONE>/priv/mcp.db, which is what 'mix setup' migrates, so one shared database needs no configuration. MCP_LOG_FILE is relative and resolves against MCP_CLONE, since the server runs from there.",
 
   "mcpServers": {
     "hex_local": {
       "command": "sh",
       "args": [
         "-c",
-        "cd /ABSOLUTE/PATH/TO/<MCP_CLONE> && exec /opt/homebrew/bin/mix mcp.server --no-compile"
+        "cd \"$MCP_CLONE\" && exec /opt/homebrew/bin/mix mcp.server --no-compile"
       ],
       "env": {
+        "MCP_CLONE": "<ABSOLUTE/PATH/TO/local_hex_mcp>",
+        "AI_API_KEY": "<YOUR-API-KEY>",
+        "PROJECT_ROOT": "<ABSOLUTE/PATH/TO/THE/REPO/YOU/ARE/EDITING>",
+
         "MIX_ENV": "prod",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-
-        "AI_API_KEY": "<YOUR-API-KEY>",
-        "PROJECT_ROOT": "/ABSOLUTE/PATH/TO/YOUR_PROJECT",
-
-        "MCP_LOG_FILE": "/ABSOLUTE/PATH/TO/<MCP_CLONE>/tmp_logs.txt",
+        "MCP_LOG_FILE": "tmp_logs.txt",
         "MCP_LOG_LEVEL": "warning"
       }
     }

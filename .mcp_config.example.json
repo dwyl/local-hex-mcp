@@ -1,20 +1,19 @@
 {
-  "_comment": "Antigravity CLI (.agents/mcp_config.json), which supports 'cwd' natively so no sh -c wrapper is needed. Copy into the repo you want to USE the server from and replace the two ALL-CAPS placeholders. MCP_CLONE is where you cloned local_hex_mcp; YOUR_PROJECT is the repo you are editing. DATABASE_PATH is deliberately absent: it defaults to <MCP_CLONE>/priv/mcp.db, which is also what 'mix setup' migrates.",
+  "_comment": "Antigravity CLI (~/.gemini/config/mcp_config.json, or .agents/plugins/<name>/mcp_config.json). It supports 'cwd' natively, so no sh -c wrapper is needed — but 'cwd' is a literal path and cannot read MCP_CLONE, so the clone path goes there instead of in the env block. Edit 'cwd' plus the two values marked <…>. PROJECT_ROOT is the repo you are editing, not the clone. DATABASE_PATH is deliberately absent: it defaults to <clone>/priv/mcp.db, which is what 'mix setup' migrates. MCP_LOG_FILE is relative and resolves against cwd.",
 
   "mcpServers": {
     "hex_local": {
       "command": "/opt/homebrew/bin/mix",
       "args": ["mcp.server", "--no-compile"],
-      "cwd": "/ABSOLUTE/PATH/TO/MCP_CLONE",
+      "cwd": "<ABSOLUTE/PATH/TO/local_hex_mcp>",
       "env": {
+        "AI_API_KEY": "<YOUR-API-KEY>",
+        "PROJECT_ROOT": "<ABSOLUTE/PATH/TO/THE/REPO/YOU/ARE/EDITING>",
+
         "MIX_ENV": "prod",
         "MIX_QUIET": "1",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-
-        "AI_API_KEY": "YOUR-API-KEY",
-        "PROJECT_ROOT": "/ABSOLUTE/PATH/TO/YOUR_PROJECT",
-
-        "MCP_LOG_FILE": "/ABSOLUTE/PATH/TO/MCP_CLONE/tmp_logs.txt",
+        "MCP_LOG_FILE": "tmp_logs.txt",
         "MCP_LOG_LEVEL": "warning"
       }
     }

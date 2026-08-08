@@ -58,75 +58,93 @@ SQLite needs no separate install — `ecto_sqlite3` bundles it — and neither d
 
 ### Setup
 
-Cloning is not the whole job. Five steps, and skipping any of the first three leaves a server that starts and then fails in a way that looks like a configuration problem.
+Three steps. Two directories are involved and mixing them up fails silently, so
+the distinction is worth holding on to from the start:
 
-**1. Dependencies and database**
+| | what it is |
+| --- | --- |
+| **the clone** | this repo. The server process runs from here, because `mix` does not walk up directories looking for `mix.exs`. |
+| **your project** | the repo you are editing. The server reads its `mix.lock` to decide which version of a package to answer about. |
+
+**1. In the clone**
 
 ```sh
 mix setup
+MIX_ENV=prod mix compile
 ```
 
 `mix setup` runs `deps.get`, `ecto.create` and `ecto.migrate`. The database path
-is compiled in as `<this repo>/priv/mcp.db` — an absolute path, so it does not
-depend on where you run the command from, and the server opens the same file
-without being told. **Leave `DATABASE_PATH` unset** and setup and server cannot
-disagree.
+is compiled in as `<the clone>/priv/mcp.db` — absolute, so it does not depend on
+where you run the command from, and the server opens the same file without being
+told. **Leave `DATABASE_PATH` unset** and setup and server cannot disagree.
 
-Set it only to give a project its own database, in which case set it *both* here
-and in the MCP config, or you will migrate one file and read another.
+`prod`, not `dev`: the MCP config runs `mix mcp.server --no-compile` under
+`MIX_ENV=prod`, so a `dev` build does not satisfy it. Repeat this step after *any*
+code change — and recompiling alone is not enough, the server must then be
+reconnected, because a running BEAM keeps the modules it already loaded.
+
+**2. Get an API key**
+
+Any OpenAI-compatible provider works. Mistral is the default and has a free tier
+generous enough for this workload, so the key alone is enough to start; point
+`AI_API_URL` elsewhere if you prefer another one, or a local embedding server.
+
+**3. In your project**
+
+Copy two files into the repo you want to *use* the server from:
+
+- `CLAUDE.md` — or `AGENTS.md`, the same content under the name other assistants
+  read. This is what teaches the assistant that `package` is required, that a
+  multi-package question is several calls, and how to read `notices`. Without it
+  the tools work but are used badly.
+- `.mcp.example.json` → `.mcp.json` (Claude Code, Cursor), or
+  `.mcp_config.example.json` → the Antigravity config.
+
+Then edit **three values**, all in the `env` block:
+
+```json
+"MCP_CLONE":    "/absolute/path/to/local_hex_mcp",
+"AI_API_KEY":   "…",
+"PROJECT_ROOT": "/absolute/path/to/the/repo/you/are/editing"
+```
+
+`MCP_CLONE` is expanded by the `sh -c` wrapper, so the clone path appears once
+rather than in three places. `MCP_LOG_FILE` is relative and resolves against it.
+`DATABASE_PATH` is absent on purpose — it defaults to `<MCP_CLONE>/priv/mcp.db`,
+the same file `mix setup` just migrated.
+
+Antigravity is the one exception: it supports `cwd` natively, but `cwd` is a
+literal and cannot read `MCP_CLONE`, so the clone path goes there instead.
+
+⚠️ **Pointing `PROJECT_ROOT` at the clone is the easy mistake, and nothing
+reports it.** Version resolution then reads *this* project's lockfile and answers
+confidently about the wrong versions.
+
+The exception is working on `local_hex_mcp` itself, where the two directories are
+the same and `PROJECT_ROOT` may be omitted: resolution falls through to the
+versions loaded in the server's own BEAM, which are that project's. A mismatch
+between the index and your deps is then *reported* rather than corrected, and
+`:application.get_key/2` only sees started applications where `mix.lock` lists
+every one.
 
 > **One database is the normal case.** `PROJECT_ROOT` is per-project — each
 > project's `.mcp.json` names its own repo — but they can all share the default
 > database, and usually should: one `mix setup`, one index, no paths to keep in
 > sync. Only one version per package is kept, so the cost appears in exactly one
-> situation: two projects pinning *different* versions of the *same* package, which
-> then re-ingests on each switch. The search says so when it happens, and the fix
-> is a separate `DATABASE_PATH` for that project.
+> situation: two projects pinning *different* versions of the *same* package,
+> which then re-ingests on each switch. The search says so when it happens, and
+> the fix is a separate `DATABASE_PATH` for that project — set *both* there and
+> at `mix setup`, or you will migrate one file and read another.
 
-**2. Compile for `prod`, not `dev`**
-
-```bash
-MIX_ENV=prod mix compile
-```
-
-The MCP config below runs `mix mcp.server --no-compile` under `MIX_ENV=prod`, so a `dev` build does not satisfy it. This is also the step to repeat after *any* code change — and recompiling alone is not enough, the server must then be reconnected, because a running BEAM keeps the modules it already loaded.
-
-**3. AI Coding assistant config file**
-
-Copy `.mcp.example.json` (Claude Code, Cursor) or `.mcp_config.example.json`
-(Antigravity) into the project you want to *use* the server from, and replace the
-two ALL-CAPS placeholders.
-
-**Two different directories are involved, and mixing them up fails silently.**
-
-| placeholder | what it is | appears in |
-| --- | --- | --- |
-| `MCP_CLONE` | where you cloned **this** repo — the server has to run from here, because `mix` does not walk up directories to find `mix.exs` | the `cd` (or `cwd`), `MCP_LOG_FILE` |
-| `YOUR_PROJECT` | the repo you are **editing** — the server reads its `mix.lock` to decide which version of a package to answer about | `PROJECT_ROOT` |
-
-⚠️ Pointing `PROJECT_ROOT` at the clone rather than at your own repo is the easy
-mistake, and nothing reports it: version resolution reads *this* project's
-lockfile and answers confidently about the wrong versions.
-
-The exception is working on `local_hex_mcp` itself, where the two directories are
-the same one and `PROJECT_ROOT` may be omitted: with no lockfile configured,
-resolution falls through to the versions loaded in the server's own BEAM, which
-are that project's. The difference is that a mismatch between the index and your
-deps is then *reported* rather than corrected, and `:application.get_key/2` only
-sees started applications where `mix.lock` lists every one.
-
-❇️ `AI_API_KEY` accepts any OpenAI-compatible provider; Mistral is the default.
-Everything else has a working default — `EMBED_BATCH_SIZE` and
-the rest are in [Configuration](#configuration) and only worth setting once
-something misbehaves.
-
-**4. Copy the agent instructions**
-
-➡️ Copy `CLAUDE.md` — or `AGENTS.md`, the same content under the name other assistants read — into that same project. It is what teaches the assistant that `package` is required, that a multi-package question is several calls, and how to read the `notices` field. Without it the tools work but are used badly.
+Everything else has a working default; `EMBED_BATCH_SIZE` and the rest are in
+[Configuration](#configuration) and only worth setting once something misbehaves.
 
 ### AI Code Assistant Configuration
 
-**Claude Code / Cursor** (`.mcp.json`):
+Both files ship in this repo — copy the one your assistant reads, then edit only
+the values marked `<…>`.
+
+**Claude Code / Cursor** (`.mcp.example.json` → `.mcp.json`):
 
 ```json
 {
@@ -135,40 +153,60 @@ something misbehaves.
       "command": "sh",
       "args": [
         "-c",
-        "cd <MCP_CLONE> && exec /opt/homebrew/bin/mix mcp.server --no-compile"
+        "cd \"$MCP_CLONE\" && exec /opt/homebrew/bin/mix mcp.server --no-compile"
       ],
       "env": {
+        "MCP_CLONE": "<ABSOLUTE/PATH/TO/local_hex_mcp>",
+        "AI_API_KEY": "<YOUR-API-KEY>",
+        "PROJECT_ROOT": "<ABSOLUTE/PATH/TO/THE/REPO/YOU/ARE/EDITING>",
+
         "MIX_ENV": "prod",
-        "AI_API_KEY": "<your-key-here>",
-        "MCP_LOG_FILE": "<MCP_CLONE>/tmp_logs.txt",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "PROJECT_ROOT": "[/absolute/path/to/the/repo/you/are/editing]"
+        "MCP_LOG_FILE": "tmp_logs.txt",
+        "MCP_LOG_LEVEL": "warning"
       }
     }
   }
 }
 ```
 
-**Google Antigravity** (`.agents/mcp_config.json`):
+Claude Code has **no `cwd` field** — any `cwd` key is ignored, so the server would
+inherit whatever directory Claude was launched from and `mix` would not find a
+`mix.exs`. The `sh -c` wrapper is what fixes that, and `exec` keeps the BEAM as
+the shell's own process so the client can signal it cleanly.
+
+`$MCP_CLONE` is expanded by that shell at spawn time, which is why the clone path
+is a variable here rather than pasted into the `cd`. `MCP_LOG_FILE` is relative
+and resolves against it.
+
+**Google Antigravity** (`.mcp_config.example.json` → `~/.gemini/config/mcp_config.json`,
+or `.agents/plugins/<name>/mcp_config.json`):
 
 ```json
 {
   "mcpServers": {
     "hex_local": {
-      "command": "mix",
+      "command": "/opt/homebrew/bin/mix",
       "args": ["mcp.server", "--no-compile"],
-      "cwd": "/absolute/path/to/local_hex_mcp",
+      "cwd": "<ABSOLUTE/PATH/TO/local_hex_mcp>",
       "env": {
+        "AI_API_KEY": "<YOUR-API-KEY>",
+        "PROJECT_ROOT": "<ABSOLUTE/PATH/TO/THE/REPO/YOU/ARE/EDITING>",
+
         "MIX_ENV": "prod",
         "MIX_QUIET": "1",
-        "AI_API_KEY": "your-key-here",
         "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "PROJECT_ROOT": "/absolute/path/to/the/repo/you/are/editing"
+        "MCP_LOG_FILE": "tmp_logs.txt",
+        "MCP_LOG_LEVEL": "warning"
       }
     }
   }
 }
 ```
+
+Antigravity supports `cwd` natively, so no wrapper is needed — but `cwd` is a
+literal path and cannot read `MCP_CLONE`, so the clone goes there instead of in
+the `env` block. Still three values to edit, just one of them a line higher.
 
 ### Local embeddings
 
