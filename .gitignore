@@ -9,4 +9,6 @@ priv/mcp.*
 .mcp_config.json
 # local MCP session log (MCP_LOG_FILE)
 tmp_logs.txt
-vendor/
+vendor/_build
+vendor/.expert
+

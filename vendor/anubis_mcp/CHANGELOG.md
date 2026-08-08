@@ -1,0 +1,831 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+## [2.0.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.14.0...v2.0.0) (2026-08-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* **transport:** remove deprecated HTTP+SSE client and server transports
+* **protocol:** drop 2024-11-05 protocol version, floor at 2025-03-26
+
+### Features
+
+* **protocol:** drop 2024-11-05 protocol version, floor at 2025-03-26 ([1930dca](https://github.com/zoedsoupe/anubis-mcp/commit/1930dca5b8d769be959cf03240fbe3cc4c431179))
+* **transport:** remove deprecated HTTP+SSE client and server transports ([e78e177](https://github.com/zoedsoupe/anubis-mcp/commit/e78e177f6c3b2f733763d6e6bf544a28ea0d7189))
+
+
+### Bug Fixes
+
+* encode resource blobs as standard base64 ([#270](https://github.com/zoedsoupe/anubis-mcp/issues/270)) ([b386810](https://github.com/zoedsoupe/anubis-mcp/commit/b3868101d62c1b593f51ef5c1c5fbbc261307242))
+* make `StreamableHTTP.Plug.init` escapable ([#276](https://github.com/zoedsoupe/anubis-mcp/issues/276)) ([562541b](https://github.com/zoedsoupe/anubis-mcp/commit/562541b64e8e4f17969c8a77a816c29b83fb2fa3))
+
+
+### Documentation
+
+* **readme:** add spec version support matrix and deprecation policy ([c96ec2c](https://github.com/zoedsoupe/anubis-mcp/commit/c96ec2c809b830c776f22d18259d2d6527c3861b))
+* **server:** mark internal session engine modules as private ([38e09ba](https://github.com/zoedsoupe/anubis-mcp/commit/38e09ba2be75d807f8a2a98230d334476601e991))
+
+## [1.14.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.13.0...v1.14.0) (2026-07-30)
+
+
+### Features
+
+* **mcp:** route message encode and validation through the negotiated protocol module ([c327da7](https://github.com/zoedsoupe/anubis-mcp/commit/c327da78bbbf659e04fd23577b94c9f748c0542d))
+* **protocol:** widen behaviour into full dialect contract ([fcefb88](https://github.com/zoedsoupe/anubis-mcp/commit/fcefb88bea304c5e077704bbef71358d8477b4d2))
+* **transport:** formalize transport-session contract as public behaviour ([784452d](https://github.com/zoedsoupe/anubis-mcp/commit/784452d49ce6dfe19e3858d79bdfcf96c9b8183b))
+
+
+### Bug Fixes
+
+* **server:** route SSE notifications across nodes via pg ([cfb8635](https://github.com/zoedsoupe/anubis-mcp/commit/cfb8635286626d0b927c0bdfcc1e4db8f2f03440))
+
+## [1.13.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.12.0...v1.13.0) (2026-07-29)
+
+
+### Bug Fixes
+
+* **server:** reject unknown sessions on the request path instead of silent auto-recovery ([b2db47f](https://github.com/zoedsoupe/anubis-mcp/commit/b2db47f4798f77d6bd15b5cb6fc540963ffede52)), closes [#204](https://github.com/zoedsoupe/anubis-mcp/issues/204)
+
+
+### Code Refactoring
+
+* **session:** extract request scheduler ([88b0cce](https://github.com/zoedsoupe/anubis-mcp/commit/88b0cce2521691d89f147ac1e1a496c04834e3a5)), closes [#253](https://github.com/zoedsoupe/anubis-mcp/issues/253)
+* **session:** extract server-initiated request engine ([8b877af](https://github.com/zoedsoupe/anubis-mcp/commit/8b877afe73c90ae47e9d1804e95a9bc0413f9f38)), closes [#253](https://github.com/zoedsoupe/anubis-mcp/issues/253)
+* **session:** extract tasks runtime ([ff6047c](https://github.com/zoedsoupe/anubis-mcp/commit/ff6047cfa49c5713fe5db7e3eb48f9da788f6c3d)), closes [#253](https://github.com/zoedsoupe/anubis-mcp/issues/253)
+
+## [1.12.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.11.0...v1.12.0) (2026-07-29)
+
+
+### Features
+
+* **session:** version session serialization format ([0a91fee](https://github.com/zoedsoupe/anubis-mcp/commit/0a91fee1dced27610a85d3e7806aae8c43faeb0a)), closes [#252](https://github.com/zoedsoupe/anubis-mcp/issues/252)
+
+
+### Bug Fixes
+
+* **client:** handle session_expired cast from streamable HTTP transport ([59a8896](https://github.com/zoedsoupe/anubis-mcp/commit/59a889640de17124a5aaab4dac9864dc4a8829cb)), closes [#264](https://github.com/zoedsoupe/anubis-mcp/issues/264)
+* **client:** store negotiated protocol version from initialize response ([3cdba16](https://github.com/zoedsoupe/anubis-mcp/commit/3cdba165cde1be930f792ef07a54e9968d7da57c)), closes [#249](https://github.com/zoedsoupe/anubis-mcp/issues/249)
+* **transport:** send and validate MCP-Protocol-Version header ([fe6b767](https://github.com/zoedsoupe/anubis-mcp/commit/fe6b767144e5f5dffc5dde5baf0541bb19aaf2ab)), closes [#250](https://github.com/zoedsoupe/anubis-mcp/issues/250)
+
+
+### Code Refactoring
+
+* **protocol:** unify version negotiation APIs ([#251](https://github.com/zoedsoupe/anubis-mcp/issues/251)) ([985d940](https://github.com/zoedsoupe/anubis-mcp/commit/985d9404a551948242f61773049e9597a0a28f5e))
+
+## [1.11.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.10.0...v1.11.0) (2026-07-29)
+
+
+### Features
+
+* **session_store:** supervise Redis store subtree to make restarts race-free ([#242](https://github.com/zoedsoupe/anubis-mcp/issues/242)) ([48c8c1a](https://github.com/zoedsoupe/anubis-mcp/commit/48c8c1ad817a83d02a13a658f2eaa3969c05301a))
+
+
+### Bug Fixes
+
+* **prompts:** wrap prompt content objects and map system_message to user role ([#234](https://github.com/zoedsoupe/anubis-mcp/issues/234)) ([2451bb7](https://github.com/zoedsoupe/anubis-mcp/commit/2451bb7b80ad3c9fb24ca6b4d3014cb19cc81abb))
+* **server:** make title option compile in use Anubis.Server.Component ([b04feed](https://github.com/zoedsoupe/anubis-mcp/commit/b04feedbe014b83f2e5f3040f2ca06873c4035ae))
+* **server:** use restart :temporary for session processes ([#240](https://github.com/zoedsoupe/anubis-mcp/issues/240)) ([30bc4f5](https://github.com/zoedsoupe/anubis-mcp/commit/30bc4f5e91fef757928da076137167a5669b9510))
+* **sse:** buffer partial events across Finch chunks ([#245](https://github.com/zoedsoupe/anubis-mcp/issues/245)) ([beea2f6](https://github.com/zoedsoupe/anubis-mcp/commit/beea2f61ad49ba92c23a5d0df138efd5f0306738))
+* Stream the client SSE GET instead of buffering it (server push never delivered) ([#231](https://github.com/zoedsoupe/anubis-mcp/issues/231)) ([a722c1b](https://github.com/zoedsoupe/anubis-mcp/commit/a722c1baf0f811d0224ea4d72b5f6ff3f551fd62))
+* **telemetry:** expose tool call success/failure in tool_call span metadata ([#246](https://github.com/zoedsoupe/anubis-mcp/issues/246)) ([ace5ecb](https://github.com/zoedsoupe/anubis-mcp/commit/ace5ecb353d0240781964538bb9bfe575daaa4a3))
+* **telemetry:** include client_info in initialize response event metadata ([#248](https://github.com/zoedsoupe/anubis-mcp/issues/248)) ([74ed457](https://github.com/zoedsoupe/anubis-mcp/commit/74ed457b9ecb8da0344a241cf949f570c39c3705))
+* **telemetry:** namespace tool_call span under :anubis_mcp ([#244](https://github.com/zoedsoupe/anubis-mcp/issues/244)) ([561a96b](https://github.com/zoedsoupe/anubis-mcp/commit/561a96b788d4241f0fba8516c34d0fb77fef0993))
+
+
+### Tests
+
+* **server:** fix stale tool_call event name and function_exported? loading races ([7247d2c](https://github.com/zoedsoupe/anubis-mcp/commit/7247d2c3ea4a01a4e56f535d67a3e1388ffb6de2))
+* **transport:** synchronize held SSE plug with Bypass teardown ([93c5a34](https://github.com/zoedsoupe/anubis-mcp/commit/93c5a34ff9edbdd5b04f2bb7ea0c724295ea6442))
+
+
+### Continuous Integration
+
+* fix dialyzer plt caching ([8424439](https://github.com/zoedsoupe/anubis-mcp/commit/842443997a3c9e3fe2e2b08dd34a603b422e42c5))
+
+## [1.10.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.9.0...v1.10.0) (2026-07-17)
+
+
+### Features
+
+* add _meta field and refresh persisted session TTL ([677a186](https://github.com/zoedsoupe/anubis-mcp/commit/677a1860fe6274fc50484e12ec6df3e33aafccab))
+
+
+### Bug Fixes
+
+* **streamable_http:** route session messages to owning SSE handler ([#229](https://github.com/zoedsoupe/anubis-mcp/issues/229)) ([3288c46](https://github.com/zoedsoupe/anubis-mcp/commit/3288c46b08f78ee79b742423ae4070f62e98c1d2))
+
+## [1.9.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.8.0...v1.9.0) (2026-07-16)
+
+
+### Features
+
+* **streamable_http:** add spec resumability (Last-Event-ID replay) ([#216](https://github.com/zoedsoupe/anubis-mcp/issues/216)) ([78e33b4](https://github.com/zoedsoupe/anubis-mcp/commit/78e33b4b575d1159cc5a7cbcf395ef248055aeda))
+* support pre_initialized sessions for cross-pod restore ([#187](https://github.com/zoedsoupe/anubis-mcp/issues/187)) ([13be0d7](https://github.com/zoedsoupe/anubis-mcp/commit/13be0d7e938a2c4de36f565530412178cbdeac60))
+
+
+### Bug Fixes
+
+* **session:** return encodable JSON-RPC errors when init/2 fails ([#211](https://github.com/zoedsoupe/anubis-mcp/issues/211)) ([f9af7cc](https://github.com/zoedsoupe/anubis-mcp/commit/f9af7ccf4b213e74afb0c111b97f9448b9990c01))
+* **streamable_http:** emit telemetry on SSE handler registration ([#217](https://github.com/zoedsoupe/anubis-mcp/issues/217)) ([4a4c528](https://github.com/zoedsoupe/anubis-mcp/commit/4a4c5289cb1aeee65cac3345a4f34660fe74207f))
+* **streamable_http:** restore session from store on notif/resp registry miss ([#221](https://github.com/zoedsoupe/anubis-mcp/issues/221)) ([d757b39](https://github.com/zoedsoupe/anubis-mcp/commit/d757b39464c40f642dae279388a543e295eeab46))
+* **streamable_http:** return correct JSON-RPC error codes for parse failures ([#222](https://github.com/zoedsoupe/anubis-mcp/issues/222)) ([1867994](https://github.com/zoedsoupe/anubis-mcp/commit/1867994cfbedbe056f72043819c9c564520606f0))
+
+## [1.8.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.7.0...v1.8.0) (2026-07-16)
+
+This release focuses on simplifying the runtime footprint and giving consumers more control over networking.
+
+**⚠️ Breaking change:** the `Application` callback and the bundled CLI have been removed. If you relied on `anubis_mcp` starting supervision trees or processes automatically via `application/0`, you'll now need to start the relevant components explicitly in your own supervision tree. See the updated [README](https://github.com/zoedsoupe/anubis-mcp#readme) and [Introduction guide](https://github.com/zoedsoupe/anubis-mcp/blob/main/pages/introduction.md) for the new setup.
+
+Alongside that, the Finch HTTP pool is now injectable, so you can plug in your own pool configuration (name, size, pool options) instead of relying on a globally started pool - handy for apps that already manage their own Finch instances or need per-tenant pools.
+
+On the housekeeping side, example apps moved out of `lib/` into a dedicated root-level folder to keep the library package lean, and CI now publishes the Hex package using Elixir 1.20.2.
+
+### Features
+
+* add a serialize_assigns callback for server ([1059119](https://github.com/zoedsoupe/anubis-mcp/commit/10591197d5d25f090832790154af1a31974a681d)), closes [#199](https://github.com/zoedsoupe/anubis-mcp/issues/199)
+* drop Application callback + CLI, make Finch pool injectable ([#224](https://github.com/zoedsoupe/anubis-mcp/issues/224)) ([b92a131](https://github.com/zoedsoupe/anubis-mcp/commit/b92a1319ac89f8faf15f3676f41e8183336f8869))
+
+
+### Bug Fixes
+
+* correctly append 2025-11-25 version to http transport ([889fa79](https://github.com/zoedsoupe/anubis-mcp/commit/889fa79244ec78fde8aeb5782c076163b1123a6e)), closes [#220](https://github.com/zoedsoupe/anubis-mcp/issues/220)
+* correctly truncate tools args ([4e9288c](https://github.com/zoedsoupe/anubis-mcp/commit/4e9288cf5b2741cb2f3aa85a12769aedd9ad74ad))
+* dedup protocol schema definitions ([a0314a2](https://github.com/zoedsoupe/anubis-mcp/commit/a0314a2844572375e05234c09f42f32603e98d80)), closes [#157](https://github.com/zoedsoupe/anubis-mcp/issues/157)
+
+
+### Documentation
+
+* revamp and rewrite ([0f459bb](https://github.com/zoedsoupe/anubis-mcp/commit/0f459bb209f8160c0339d0ce14fc53a4f8d5576a))
+
+
+### Miscellaneous Chores
+
+* move example apps to dedicated root folder ([631a929](https://github.com/zoedsoupe/anubis-mcp/commit/631a929a9778ea19cb862a4077512947bff8887c))
+* remove dead llms.txt ([1e115b5](https://github.com/zoedsoupe/anubis-mcp/commit/1e115b5653567e5d066f20b7db3e598bad882262))
+
+
+### Continuous Integration
+
+* use elixir 1.20.2 to publish hex pkg ([a4d5f3c](https://github.com/zoedsoupe/anubis-mcp/commit/a4d5f3c6bfd06015a1c205390a80005ebe9c73ba))
+
+## [1.7.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.6.2...v1.7.0) (2026-07-16)
+
+
+### Features
+
+* **streamable_http:** per-subscriber metadata and targeted sends ([#218](https://github.com/zoedsoupe/anubis-mcp/issues/218)) ([c606658](https://github.com/zoedsoupe/anubis-mcp/commit/c6066581fb7ff4a1665a8c2883ba675bd4f8b7a9))
+
+
+### Bug Fixes
+
+* Forward configured :headers on the DELETE session-teardown request (follow-up to [#180](https://github.com/zoedsoupe/anubis-mcp/issues/180)) ([#213](https://github.com/zoedsoupe/anubis-mcp/issues/213)) ([b32134a](https://github.com/zoedsoupe/anubis-mcp/commit/b32134a03fde24e8479d3e31d3459f9652136889))
+* prevent "Server not initialized" race on first request ([#198](https://github.com/zoedsoupe/anubis-mcp/issues/198)) ([e84624c](https://github.com/zoedsoupe/anubis-mcp/commit/e84624cdf603ca65b26de77f253bdadf51a57079))
+* **server:** resolve session names via Registry to prevent atom-exhaustion DoS ([#188](https://github.com/zoedsoupe/anubis-mcp/issues/188)) ([17e4a6d](https://github.com/zoedsoupe/anubis-mcp/commit/17e4a6d7d4c1baa90744b2c54392025b170a3f3a))
+* **session:** trap_exit so terminate/2 runs on supervisor shutdown ([#209](https://github.com/zoedsoupe/anubis-mcp/issues/209)) ([6335cf4](https://github.com/zoedsoupe/anubis-mcp/commit/6335cf4d7a537204d99995c4b4eb675eaa3e3a83))
+* **streamable_http:** don't close superseded SSE handler to prevent reconnect flap ([#215](https://github.com/zoedsoupe/anubis-mcp/issues/215)) ([a1e0ce6](https://github.com/zoedsoupe/anubis-mcp/commit/a1e0ce649b27198fe8a08ffa80ad68b8c840a9db))
+
+
+### Continuous Integration
+
+* add new elixir versions ([3b636a8](https://github.com/zoedsoupe/anubis-mcp/commit/3b636a8171560cd8a3a09591faf83c511f7cab30))
+* add pr-quality workflow ([c0ca08f](https://github.com/zoedsoupe/anubis-mcp/commit/c0ca08f31bcac2ea322dd0c6249f8d7efa8ffcd3))
+* fix zig correct version for burrito ([6e410bd](https://github.com/zoedsoupe/anubis-mcp/commit/6e410bd509031264c138cdf4ff0efd8aa27d491a))
+* use mlugg/setup-zig 0.15.2 in release-please auto build job ([2ed6187](https://github.com/zoedsoupe/anubis-mcp/commit/2ed61875f87e464d20cbf8392d9c72933894755f))
+
+## [1.6.2](https://github.com/zoedsoupe/anubis-mcp/compare/v1.6.1...v1.6.2) (2026-06-09)
+
+### Bug Fixes
+
+- forward :headers to SSE GET request ([#180](https://github.com/zoedsoupe/anubis-mcp/issues/180)) ([bb3280f](https://github.com/zoedsoupe/anubis-mcp/commit/bb3280f127084c627983b0c6b1ab4c87ec23c879))
+- macros for Elixir 1.20 type checker compatibility ([48c9478](https://github.com/zoedsoupe/anubis-mcp/commit/48c947840e3bc60bc516d2a68cdacf6d2222b4b7))
+- **streamable_http:** always advertise both content types on POST ([#178](https://github.com/zoedsoupe/anubis-mcp/issues/178)) ([66abc13](https://github.com/zoedsoupe/anubis-mcp/commit/66abc132e5c43993e260793eef1cb32ba152be26))
+
+## [1.6.1](https://github.com/zoedsoupe/anubis-mcp/compare/v1.6.0...v1.6.1) (2026-05-23)
+
+### Bug Fixes
+
+- Echo request id in "Server not initialized" error ([#168](https://github.com/zoedsoupe/anubis-mcp/issues/168)) ([226b71e](https://github.com/zoedsoupe/anubis-mcp/commit/226b71ef92bd90216d79cd4998636b147763bf4b))
+
+## [1.6.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.5.0...v1.6.0) (2026-05-18)
+
+### Features
+
+- add OAuth 2.1 authorization for MCP servers ([#158](https://github.com/zoedsoupe/anubis-mcp/issues/158)) ([a12a8f6](https://github.com/zoedsoupe/anubis-mcp/commit/a12a8f6ba9db8498a212f566898b66c99631993e))
+- add Registry.PG for distributed session tracking via :pg ([#160](https://github.com/zoedsoupe/anubis-mcp/issues/160)) ([512e103](https://github.com/zoedsoupe/anubis-mcp/commit/512e1033aa6f868b33658395e6fe1f0e28c8faf8))
+
+## [1.5.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.4.0...v1.5.0) (2026-05-09)
+
+### Features
+
+- MCP Tasks (2025-11-25) — server-receiver for tools/call ([#98](https://github.com/zoedsoupe/anubis-mcp/issues/98)) ([#155](https://github.com/zoedsoupe/anubis-mcp/issues/155)) ([51348f1](https://github.com/zoedsoupe/anubis-mcp/commit/51348f1a6e2b069fbe91c1cd50ce4610303de393))
+
+### Bug Fixes
+
+- drop compile-connected deps from component/1 macro ([#154](https://github.com/zoedsoupe/anubis-mcp/issues/154)) ([1e368b9](https://github.com/zoedsoupe/anubis-mcp/commit/1e368b906092b863362737a90f83ae5a35fd078f))
+
+### Continuous Integration
+
+- fix flaky test ([939fd76](https://github.com/zoedsoupe/anubis-mcp/commit/939fd769813a85170e3b59153a4b8e7f5804150e))
+
+## [1.4.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.3.1...v1.4.0) (2026-05-08)
+
+### Features
+
+- add resource subscription capability implementation ([#152](https://github.com/zoedsoupe/anubis-mcp/issues/152)) ([10a09cf](https://github.com/zoedsoupe/anubis-mcp/commit/10a09cf89ffbd26651138c74961c442b6257cc40))
+- dispatch session requests in supervised tasks ([#153](https://github.com/zoedsoupe/anubis-mcp/issues/153)) ([f0496b4](https://github.com/zoedsoupe/anubis-mcp/commit/f0496b41a40eb6fabd4e015ec3f0ed35575efd44))
+
+### Tests
+
+- cut suite from 62s to 8s ([#149](https://github.com/zoedsoupe/anubis-mcp/issues/149)) ([e5a86f5](https://github.com/zoedsoupe/anubis-mcp/commit/e5a86f592778b85d790a9ca41e577b56a2b3744d))
+
+## [1.3.1](https://github.com/zoedsoupe/anubis-mcp/compare/v1.3.0...v1.3.1) (2026-05-04)
+
+### Bug Fixes
+
+- log sse_keepalive_failed at :warning, matching sse_send_failed ([#145](https://github.com/zoedsoupe/anubis-mcp/issues/145)) ([f8dbc43](https://github.com/zoedsoupe/anubis-mcp/commit/f8dbc43e2fc0fd9debd5851aebcb31ab459459bd))
+
+### Miscellaneous Chores
+
+- change setup-zig version on ci ([f77a844](https://github.com/zoedsoupe/anubis-mcp/commit/f77a844cd0c706db3240f1c655a7277969940244))
+
+### Code Refactoring
+
+- delegate JSON Schema to Peri, retire :mcp_field ([#146](https://github.com/zoedsoupe/anubis-mcp/issues/146)) ([9c674fd](https://github.com/zoedsoupe/anubis-mcp/commit/9c674fd44499a3a0c6ed271748ec7fb44fb4c914))
+
+## [1.3.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.2.0...v1.3.0) (2026-04-29)
+
+### Features
+
+- **elicitation:** MCP 2025-06-18 elicitation support ([#139](https://github.com/zoedsoupe/anubis-mcp/issues/139)) ([8ab36e2](https://github.com/zoedsoupe/anubis-mcp/commit/8ab36e2f051984a9dc841e7f97e58542e5746800))
+- resource templates with RFC 6570 URI matching ([#141](https://github.com/zoedsoupe/anubis-mcp/issues/141)) ([aaee374](https://github.com/zoedsoupe/anubis-mcp/commit/aaee37489887cd8725821a73b80f71ad21c626e2))
+
+### Bug Fixes
+
+- scope POST-with-SSE response to originating conn ([#144](https://github.com/zoedsoupe/anubis-mcp/issues/144)) ([5593006](https://github.com/zoedsoupe/anubis-mcp/commit/5593006ce6bbdcd9e6ce74aff1820247c807a463))
+
+## [1.2.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.1.1...v1.2.0) (2026-04-24)
+
+### Features
+
+- pluggable session supervisor and :via tuple session naming ([#133](https://github.com/zoedsoupe/anubis-mcp/issues/133)) ([0a1aadc](https://github.com/zoedsoupe/anubis-mcp/commit/0a1aadc3b00be036980920a2c0e0a8ce55d2b392))
+
+### Bug Fixes
+
+- correct SSE task lifecycle bugs in StreamableHTTP transport ([#130](https://github.com/zoedsoupe/anubis-mcp/issues/130)) ([3a34382](https://github.com/zoedsoupe/anubis-mcp/commit/3a343828f3d6974fdbdeb9ab1589b9a52a56ad4f))
+- defer streamable_http plug opts fetching to runtime ([#137](https://github.com/zoedsoupe/anubis-mcp/issues/137)) ([ad29215](https://github.com/zoedsoupe/anubis-mcp/commit/ad2921549529eac26488bdcf7be5c876c548e618))
+- handle session expiry gracefully with optional callback and store restore ([#134](https://github.com/zoedsoupe/anubis-mcp/issues/134)) ([a42f462](https://github.com/zoedsoupe/anubis-mcp/commit/a42f4625f466ea46a490014d82c11ab8fde042dc))
+- prevent lost SSE responses when client connection closes ([#132](https://github.com/zoedsoupe/anubis-mcp/issues/132)) ([f961fa0](https://github.com/zoedsoupe/anubis-mcp/commit/f961fa0719d795eeb2a629ae5764cbb8b29a4c1b))
+- replace opaque KeyError with ArgumentError for missing :client_info ([#135](https://github.com/zoedsoupe/anubis-mcp/issues/135)) ([fc9444c](https://github.com/zoedsoupe/anubis-mcp/commit/fc9444cdab045e0275570dfb4f0ff6dcf1a42eb0))
+- server stdio test againts custom io device ([#136](https://github.com/zoedsoupe/anubis-mcp/issues/136)) ([4b567d9](https://github.com/zoedsoupe/anubis-mcp/commit/4b567d99fa1dced884ddc89b6798a540e643ba2c))
+
+## [1.1.1](https://github.com/zoedsoupe/anubis-mcp/compare/v1.1.0...v1.1.1) (2026-04-22)
+
+### Bug Fixes
+
+- buffer chunked STDIO responses before decoding in client ([#127](https://github.com/zoedsoupe/anubis-mcp/issues/127)) ([eff7f24](https://github.com/zoedsoupe/anubis-mcp/commit/eff7f248084077e081d57122648963a1ab24e35e))
+
+### Miscellaneous Chores
+
+- capture log from stdio transports processes ([fbcca0a](https://github.com/zoedsoupe/anubis-mcp/commit/fbcca0a1204e4e1602d8abe277af03f067338d10))
+- encapsulate transport_parse_state into the Client.State struct ([602d74c](https://github.com/zoedsoupe/anubis-mcp/commit/602d74c7045e3087db4424ba55d61cfcf2c7f663))
+- suppress SSE deprecation warnings ([05565fc](https://github.com/zoedsoupe/anubis-mcp/commit/05565fc030c449909bbdcb72d67773b9edefea9c))
+- supress SSE deprecation warnings ([8334779](https://github.com/zoedsoupe/anubis-mcp/commit/833477912037a02972fff410aa646c9df7059f09))
+
+### Tests
+
+- fix the stdio cast message from server using a buffer ([76d7ecd](https://github.com/zoedsoupe/anubis-mcp/commit/76d7ecd52d8fc469615f4febe151d0cda11b3713))
+
+## [1.1.0](https://github.com/zoedsoupe/anubis-mcp/compare/v1.0.0...v1.1.0) (2026-04-13)
+
+### Features
+
+- Add Client.await_ready/2 to block until MCP handshake completes ([#117](https://github.com/zoedsoupe/anubis-mcp/issues/117)) ([4c48647](https://github.com/zoedsoupe/anubis-mcp/commit/4c48647192c3304e012049669729008d7177940e))
+- add instructions field to initialize response ([#122](https://github.com/zoedsoupe/anubis-mcp/issues/122)) ([8103b7c](https://github.com/zoedsoupe/anubis-mcp/commit/8103b7c5cbc12ace1e302edd059e42c0a04618f1))
+
+### Documentation
+
+- correct supervision tree setup ([#118](https://github.com/zoedsoupe/anubis-mcp/issues/118)) ([ae2560a](https://github.com/zoedsoupe/anubis-mcp/commit/ae2560a8a7fd85847557ac21fc978e15dc5f7995))
+
+## [1.0.0](https://github.com/zoedsoupe/anubis-mcp/compare/v0.17.1...v1.0.0) (2026-03-16)
+
+### ⚠ BREAKING CHANGES
+
+- remove client base module and client macro ([#110](https://github.com/zoedsoupe/anubis-mcp/issues/110))
+- **phase-3:** server re-implementation and simplification ([#96](https://github.com/zoedsoupe/anubis-mcp/issues/96))
+
+### Features
+
+- add _meta support to Tool struct and JSON encoder ([#108](https://github.com/zoedsoupe/anubis-mcp/issues/108)) ([6ac49d1](https://github.com/zoedsoupe/anubis-mcp/commit/6ac49d181baed767defe9fc5138c6d41caa26f20))
+
+### Bug Fixes
+
+- **phase-5:** remove dead code and update docs ([#104](https://github.com/zoedsoupe/anubis-mcp/issues/104)) ([eea86af](https://github.com/zoedsoupe/anubis-mcp/commit/eea86af23dcb805a7770894c6a6a897700c38dfe))
+- regression for input/output server schema ([85f8ebb](https://github.com/zoedsoupe/anubis-mcp/commit/85f8ebb7439c51ab5cb0df974e08720833f534e9))
+- remove client base module and client macro ([#110](https://github.com/zoedsoupe/anubis-mcp/issues/110)) ([1f9f13c](https://github.com/zoedsoupe/anubis-mcp/commit/1f9f13cf2c44294391dd580030a1210dcd349fd5))
+- server examples and sse server transport ([944bafb](https://github.com/zoedsoupe/anubis-mcp/commit/944bafb01c29afa36a82eddc81c6e1c6d0278a9c))
+- session serializion errors ([#112](https://github.com/zoedsoupe/anubis-mcp/issues/112)) ([cb8c0e3](https://github.com/zoedsoupe/anubis-mcp/commit/cb8c0e31ad831484425e378951a85591c8cbf29f)), closes [#60](https://github.com/zoedsoupe/anubis-mcp/issues/60)
+- Start SSE keepalive when first handler is registered ([#83](https://github.com/zoedsoupe/anubis-mcp/issues/83)) ([c3c01e9](https://github.com/zoedsoupe/anubis-mcp/commit/c3c01e975f57ef421783f963adf717b522b5c724))
+- stdio server transport working ([#111](https://github.com/zoedsoupe/anubis-mcp/issues/111)) ([b331281](https://github.com/zoedsoupe/anubis-mcp/commit/b33128172db3f4ec3766cb4c7125f83bc3a85dd7))
+
+### Code Refactoring
+
+- **phase-3:** server re-implementation and simplification ([#96](https://github.com/zoedsoupe/anubis-mcp/issues/96)) ([badb0f0](https://github.com/zoedsoupe/anubis-mcp/commit/badb0f0111521f8bd5a5dba32574c25e1b589c91))
+- **phase-4:** client extraction of handlers ([#100](https://github.com/zoedsoupe/anubis-mcp/issues/100)) ([08b98c0](https://github.com/zoedsoupe/anubis-mcp/commit/08b98c03e50d698a781507ee63a4a6c5f8cdcb5e))
+
+## [0.17.1](https://github.com/zoedsoupe/anubis-mcp/compare/v0.17.0...v0.17.1) (2026-02-28)
+
+### Bug Fixes
+
+- Check Process.alive? before sending to SSE handler ([#82](https://github.com/zoedsoupe/anubis-mcp/issues/82)) ([e1dc705](https://github.com/zoedsoupe/anubis-mcp/commit/e1dc705f1ae8ee7e8670d26c7fdfc30583d19efd))
+
+### Code Refactoring
+
+- **phase-1:** abstract protocol version negotiation ([#93](https://github.com/zoedsoupe/anubis-mcp/issues/93)) ([05a2362](https://github.com/zoedsoupe/anubis-mcp/commit/05a2362a672ef462e73bc9a3f637c3f203c0978e))
+- **phase-2:** transport layer as functions, backward compatible ([#95](https://github.com/zoedsoupe/anubis-mcp/issues/95)) ([105d6a9](https://github.com/zoedsoupe/anubis-mcp/commit/105d6a91e31d8dbf606ec7916317f9add94acf4e))
+
+## [0.17.0](https://github.com/zoedsoupe/anubis-mcp/compare/v0.16.0...v0.17.0) (2025-12-09)
+
+### Features
+
+- **redis:** add redix_opts for SSL/TLS support ([#59](https://github.com/zoedsoupe/anubis-mcp/issues/59)) ([33658ab](https://github.com/zoedsoupe/anubis-mcp/commit/33658abab69e1f0c361a4dbf4e9665bb900d2f7e))
+
+### Bug Fixes
+
+- added server component description/0 callback ([#58](https://github.com/zoedsoupe/anubis-mcp/issues/58)) ([a094473](https://github.com/zoedsoupe/anubis-mcp/commit/a094473916f7ac414369bb2faab1593fd141a7f1))
+- redix should be loaded ([#71](https://github.com/zoedsoupe/anubis-mcp/issues/71)) ([09b872f](https://github.com/zoedsoupe/anubis-mcp/commit/09b872fe5dc48665beee3be8a7b7ae9943ce48ae))
+
+## [0.16.0](https://github.com/zoedsoupe/anubis-mcp/compare/v0.15.0...v0.16.0) (2025-11-18)
+
+### Features
+
+- redis based session store (continue from [#48](https://github.com/zoedsoupe/anubis-mcp/issues/48)) ([#55](https://github.com/zoedsoupe/anubis-mcp/issues/55)) ([fddea32](https://github.com/zoedsoupe/anubis-mcp/commit/fddea327ef8d91c57c4dc65f527aadc3e8d105a2))
+
+### Bug Fixes
+
+- correct arguments in Logging.should_log? ([#47](https://github.com/zoedsoupe/anubis-mcp/issues/47)) ([6f550e6](https://github.com/zoedsoupe/anubis-mcp/commit/6f550e647fd5e6e7c6cdfb233e1cc8a4ac530fc7))
+
+## [0.15.0](https://github.com/zoedsoupe/anubis-mcp/compare/v0.14.1...v0.15.0) (2025-11-03)
+
+### Features
+
+- add timeout for client/server -&gt; transport calling option ([#50](https://github.com/zoedsoupe/anubis-mcp/issues/50)) ([1e37c23](https://github.com/zoedsoupe/anubis-mcp/commit/1e37c23d3af3f40c54e0ba8b1bcc5043d80547d1))
+- allow template resources registration ([#43](https://github.com/zoedsoupe/anubis-mcp/issues/43)) ([9af9b8d](https://github.com/zoedsoupe/anubis-mcp/commit/9af9b8dcf4368ba981b667acc86b47b45a7d8ff4))
+
+### Bug Fixes
+
+- Timeout options not properly passed to HTTP transport ([#52](https://github.com/zoedsoupe/anubis-mcp/issues/52)) ([0d392d6](https://github.com/zoedsoupe/anubis-mcp/commit/0d392d64010e39f4ce38a4427b960574fa6e82aa))
+
+## [0.14.1](https://github.com/zoedsoupe/anubis-mcp/compare/v0.14.0...v0.14.1) (2025-10-07)
+
+### Bug Fixes
+
+- correct capability parsing to nest options under capability keys ([#31](https://github.com/zoedsoupe/anubis-mcp/issues/31)) ([9946027](https://github.com/zoedsoupe/anubis-mcp/commit/9946027072aee81297ee3c6c10e75acbb1328ae3))
+- correctly handle timeouts and keepalive ([#41](https://github.com/zoedsoupe/anubis-mcp/issues/41)) ([2f44840](https://github.com/zoedsoupe/anubis-mcp/commit/2f448404601799a061c9971bee69222d9c7bf927))
+
+### Documentation
+
+- rewrite introduction/home documentation page ([34baf39](https://github.com/zoedsoupe/anubis-mcp/commit/34baf3907e7e50b490398f48c32a782d213c36e9))
+
+### Miscellaneous Chores
+
+- add sponsors section with coderabbit ([f04f8bb](https://github.com/zoedsoupe/anubis-mcp/commit/f04f8bb100eb03602fd59716936ce2353040f4b2))
+- update example projects elixir deps, use fixed otp version and stable version for CLI release ([b362e54](https://github.com/zoedsoupe/anubis-mcp/commit/b362e54594d1551856436eb401a394be33dbf3a6))
+
+### Continuous Integration
+
+- fix zig version for CLI release and locally on flake ([e7ed2b4](https://github.com/zoedsoupe/anubis-mcp/commit/e7ed2b4aa94cef5edf5968f30c24e5b1e4aac81e))
+
+## [0.14.0](https://github.com/zoedsoupe/anubis-mcp/compare/v0.13.1...v0.14.0) (2025-08-21)
+
+### Features
+
+- `resources/templates/list` method for clients ([a6eb210](https://github.com/zoedsoupe/anubis-mcp/commit/a6eb210af4b6913d8a8480e5247002c2b15f511c))
+
+### Bug Fixes
+
+- align docs and parsing of server component schema-field definition options ([#12](https://github.com/zoedsoupe/anubis-mcp/issues/12)) ([cb2df76](https://github.com/zoedsoupe/anubis-mcp/commit/cb2df761e05beacf2beb3d5e94bf56329c203cc7))
+- correctly pass server call timeout options ([a49f497](https://github.com/zoedsoupe/anubis-mcp/commit/a49f4973545860e98fa056655ff229df70c70749))
+- explicit handle title for components ([#9](https://github.com/zoedsoupe/anubis-mcp/issues/9)) ([1adfed2](https://github.com/zoedsoupe/anubis-mcp/commit/1adfed2f0e18a4cd2dc7d013556455a155a8ff7f))
+- output schemas should not validate on error resps ([#15](https://github.com/zoedsoupe/anubis-mcp/issues/15)) ([b5faaad](https://github.com/zoedsoupe/anubis-mcp/commit/b5faaad5c409b3616273d5bee822d609ef35803b))
+
+### Reverts
+
+- "Add keep-alive messages to the StreamableHTTP transport ([#11](https://github.com/zoedsoupe/anubis-mcp/issues/11))" ([8ea5a3c](https://github.com/zoedsoupe/anubis-mcp/commit/8ea5a3c8edd31394b4f47cb3e4f73f06d8d12fed))
+
+### Miscellaneous Chores
+
+- rename hermes folders/files to anubis ([#5](https://github.com/zoedsoupe/anubis-mcp/issues/5)) ([239ee3f](https://github.com/zoedsoupe/anubis-mcp/commit/239ee3f611fd9ba3a8234ee8155da1cb9a8b89c7))
+
+## [0.13.1](https://github.com/zoedsoupe/anubis-mcp/compare/v0.13.0...v0.13.1) (2025-07-31)
+
+### Bug Fixes
+
+- not crash server on empty tool/prompt args ([#4](https://github.com/zoedsoupe/anubis-mcp/issues/4)) ([ee8043f](https://github.com/zoedsoupe/anubis-mcp/commit/ee8043f331481790931d2d711b6df8f9cd7a4940))
+
+### Miscellaneous Chores
+
+- old release are from the original fork ([e99d8ba](https://github.com/zoedsoupe/anubis-mcp/commit/e99d8baa7e8c00f3105ce16f8ac2178698859278))
+- plug router config on readme ([#2](https://github.com/zoedsoupe/anubis-mcp/issues/2)) ([243176c](https://github.com/zoedsoupe/anubis-mcp/commit/243176cd95fdb3ac0a500630b4e80cc26bc33769))
+- readme ([bed6ff7](https://github.com/zoedsoupe/anubis-mcp/commit/bed6ff78ed617af3eaba6d316c1107643e8aea06))
+
+## [0.13.0](https://github.com/cloudwalk/hermes-mcp/compare/v0.12.1...v0.13.0) (2025-07-18)
+
+### Features
+
+- allow redact patterns on server assigns/data ([#190](https://github.com/cloudwalk/hermes-mcp/issues/190)) ([07af99f](https://github.com/cloudwalk/hermes-mcp/commit/07af99f9e43d2afa87bf5504437ecf21c346a1d7))
+- better dsl for embedded nested fields on server components ([#199](https://github.com/cloudwalk/hermes-mcp/issues/199)) ([097f5fd](https://github.com/cloudwalk/hermes-mcp/commit/097f5fd8f788aaaa73c5e3d6699937656488886f))
+- new server response contents for tools/resources with annotations (2025-06-18) ([#195](https://github.com/cloudwalk/hermes-mcp/issues/195)) ([9b65308](https://github.com/cloudwalk/hermes-mcp/commit/9b653087a6ddfac399b33be2c4be54d564335c84))
+- resources templates ([#193](https://github.com/cloudwalk/hermes-mcp/issues/193)) ([1457e59](https://github.com/cloudwalk/hermes-mcp/commit/1457e59f16b77ca894b07a731d69ca5f8337c42b))
+- tools output schema feature (2025-06-18) ([#194](https://github.com/cloudwalk/hermes-mcp/issues/194)) ([8088a49](https://github.com/cloudwalk/hermes-mcp/commit/8088a49ce4463a01e899418bb9c34fce30427d3c))
+
+### Miscellaneous Chores
+
+- deprecate sse transport ([#187](https://github.com/cloudwalk/hermes-mcp/issues/187)) ([1932fbc](https://github.com/cloudwalk/hermes-mcp/commit/1932fbcdef12194c496d3ac074b17ef65fe18e49))
+- **deps:** bump the npm_and_yarn group across 1 directory with 2 updates ([#198](https://github.com/cloudwalk/hermes-mcp/issues/198)) ([5e21aac](https://github.com/cloudwalk/hermes-mcp/commit/5e21aac07ab1e709cb2bad8ddf9f45ba3ff99ef9))
+- readme ([bed6ff7](https://github.com/cloudwalk/hermes-mcp/commit/bed6ff78ed617af3eaba6d316c1107643e8aea06))
+
+## [0.12.1](https://github.com/cloudwalk/hermes-mcp/compare/v0.12.0...v0.12.1) (2025-07-14)
+
+### Code Refactoring
+
+- do not hangle on transport process ([#185](https://github.com/cloudwalk/hermes-mcp/issues/185)) ([e6ba926](https://github.com/cloudwalk/hermes-mcp/commit/e6ba9260ceb8e078ca043d6f1ceb41d540b42ca0))
+- remove batch messaging feature ([#183](https://github.com/cloudwalk/hermes-mcp/issues/183)) ([99458c0](https://github.com/cloudwalk/hermes-mcp/commit/99458c0559d69addf9e22b3f7e38891e83d475de))
+
+## [0.12.0](https://github.com/cloudwalk/hermes-mcp/compare/v0.11.3...v0.12.0) (2025-07-11)
+
+### Features
+
+- client sampling capability ([#170](https://github.com/cloudwalk/hermes-mcp/issues/170)) ([da617a6](https://github.com/cloudwalk/hermes-mcp/commit/da617a694dbeff1d363e7b671a31f484e202e685))
+- roots/list and completion features ([#178](https://github.com/cloudwalk/hermes-mcp/issues/178)) ([d22a6bd](https://github.com/cloudwalk/hermes-mcp/commit/d22a6bdfb92189e54455c49120abc2c7fa4f8814))
+- server components cursor pagination ([#177](https://github.com/cloudwalk/hermes-mcp/issues/177)) ([a95eba7](https://github.com/cloudwalk/hermes-mcp/commit/a95eba7cc2ffcefca99b3961b80094bb12a3912f))
+- server-side sampling capability ([#173](https://github.com/cloudwalk/hermes-mcp/issues/173)) ([c09e7f3](https://github.com/cloudwalk/hermes-mcp/commit/c09e7f3a5e95e59f5644ef12e1602b3b8621df7f))
+
+### Bug Fixes
+
+- allow configuring server request timeout ([#182](https://github.com/cloudwalk/hermes-mcp/issues/182)) ([e79fe2f](https://github.com/cloudwalk/hermes-mcp/commit/e79fe2f003a41517a5ff5e8f6e3fb378bdc43f11))
+- do not allow duplicate server components and more convenient API ([#180](https://github.com/cloudwalk/hermes-mcp/issues/180)) ([bc71df8](https://github.com/cloudwalk/hermes-mcp/commit/bc71df8f7c6fb877f19dada9b17c3eb342d32ccd))
+
+### Miscellaneous Chores
+
+- add llms summary about the library ([#175](https://github.com/cloudwalk/hermes-mcp/issues/175)) ([ed0e608](https://github.com/cloudwalk/hermes-mcp/commit/ed0e60872e5b77ddb6ffff13da6c1e20b1c2d7a2))
+- allow different kind of components have the same name ([#181](https://github.com/cloudwalk/hermes-mcp/issues/181)) ([d5ba6f5](https://github.com/cloudwalk/hermes-mcp/commit/d5ba6f56fb54ed07e46d37c2217dcf76c793762f))
+
+### Code Refactoring
+
+- handle_sampling callback, use frame as entrypoint for notifications ([#176](https://github.com/cloudwalk/hermes-mcp/issues/176)) ([1e88711](https://github.com/cloudwalk/hermes-mcp/commit/1e887117ba81751042534d60df79d83a8123a3d9))
+- interactive tasks now support JSON file input ([#172](https://github.com/cloudwalk/hermes-mcp/issues/172)) ([9465266](https://github.com/cloudwalk/hermes-mcp/commit/946526617171094ccf929a5d9f3bbd8e3a591f18))
+
+## [0.11.3](https://github.com/cloudwalk/hermes-mcp/compare/v0.11.2...v0.11.3) (2025-07-02)
+
+### Bug Fixes
+
+- correctly parse dates when default values are passed ([58f6368](https://github.com/cloudwalk/hermes-mcp/commit/58f63686574e230269f847ee793d9561976653bb))
+- include frame helpers on module-based component ([#163](https://github.com/cloudwalk/hermes-mcp/issues/163)) ([15ba2c7](https://github.com/cloudwalk/hermes-mcp/commit/15ba2c7fbdd0a776eabe028aef0350f4f52a43a8))
+- server can now send notifications correctly ([#166](https://github.com/cloudwalk/hermes-mcp/issues/166)) ([33f32de](https://github.com/cloudwalk/hermes-mcp/commit/33f32deccd42dc4591832636b2b3fad56ce40661))
+
+### Miscellaneous Chores
+
+- update documentation, simplify, more storytelling ([#168](https://github.com/cloudwalk/hermes-mcp/issues/168)) ([ccdddc1](https://github.com/cloudwalk/hermes-mcp/commit/ccdddc1478c09e2f3440a6f1343949aeca854a1d))
+
+## [0.11.2](https://github.com/cloudwalk/hermes-mcp/compare/v0.11.1...v0.11.2) (2025-06-30)
+
+### Bug Fixes
+
+- correctly parse peri numeric contrainsts to json-schema ([#160](https://github.com/cloudwalk/hermes-mcp/issues/160)) ([808c2c0](https://github.com/cloudwalk/hermes-mcp/commit/808c2c09e490bf9a866d5575abbf08d355c8324b))
+- interactive http tasks should accept custom headers ([#159](https://github.com/cloudwalk/hermes-mcp/issues/159)) ([c2fe91e](https://github.com/cloudwalk/hermes-mcp/commit/c2fe91eff5a701e42a636ee1a291ea51a93f7983))
+
+## [0.11.1](https://github.com/cloudwalk/hermes-mcp/compare/v0.11.0...v0.11.1) (2025-06-30)
+
+### Bug Fixes
+
+- loggin should respect the logger config ([#157](https://github.com/cloudwalk/hermes-mcp/issues/157)) ([0fbf6a6](https://github.com/cloudwalk/hermes-mcp/commit/0fbf6a652ed9dd5da64716d47ece675192442ea0))
+
+## [0.11.0](https://github.com/cloudwalk/hermes-mcp/compare/v0.10.5...v0.11.0) (2025-06-30)
+
+### Features
+
+- runtime server components, simplified api ([#153](https://github.com/cloudwalk/hermes-mcp/issues/153)) ([8af35d6](https://github.com/cloudwalk/hermes-mcp/commit/8af35d67cd15d125e40ab9b115ff6900c3487ea5))
+
+### Bug Fixes
+
+- allow users to control external process messages ([#149](https://github.com/cloudwalk/hermes-mcp/issues/149)) ([8fef4eb](https://github.com/cloudwalk/hermes-mcp/commit/8fef4eb753f38a325a1d3a94c310e5fd1c478ede))
+- correctly encode prompt/resource ([#155](https://github.com/cloudwalk/hermes-mcp/issues/155)) ([4249b13](https://github.com/cloudwalk/hermes-mcp/commit/4249b137e43587862de2e59acba4660ac785702a))
+- more genserver mcp server callbacks, plug based startup and documentation ([#152](https://github.com/cloudwalk/hermes-mcp/issues/152)) ([9c26b1c](https://github.com/cloudwalk/hermes-mcp/commit/9c26b1ce4d033e3c69bc872a5ed01a037ec68f59))
+- server behaviour with optional callbacks ([#151](https://github.com/cloudwalk/hermes-mcp/issues/151)) ([91aa191](https://github.com/cloudwalk/hermes-mcp/commit/91aa1916f28da5972f6b100861a2547697c1ddb7))
+
+### Code Refactoring
+
+- improve runtime components schema def ([#154](https://github.com/cloudwalk/hermes-mcp/issues/154)) ([96ff2a9](https://github.com/cloudwalk/hermes-mcp/commit/96ff2a97be02f0f35ee4a288838a1dbf518bbac3))
+
+## [0.10.5](https://github.com/cloudwalk/hermes-mcp/compare/v0.10.4...v0.10.5) (2025-06-25)
+
+### Bug Fixes
+
+- normalize transport api ([#146](https://github.com/cloudwalk/hermes-mcp/issues/146)) ([8a30a34](https://github.com/cloudwalk/hermes-mcp/commit/8a30a34c944ca4d85de622f9063a558bd495c6fc)), closes [#145](https://github.com/cloudwalk/hermes-mcp/issues/145)
+
+## [0.10.4](https://github.com/cloudwalk/hermes-mcp/compare/v0.10.3...v0.10.4) (2025-06-24)
+
+### Bug Fixes
+
+- server session expiration on idle (configurable) ([#143](https://github.com/cloudwalk/hermes-mcp/issues/143)) ([d9f7164](https://github.com/cloudwalk/hermes-mcp/commit/d9f7164028b2b6e8ff3d697f888adf655110bc1f))
+
+## [0.10.3](https://github.com/cloudwalk/hermes-mcp/compare/v0.10.2...v0.10.3) (2025-06-23)
+
+### Bug Fixes
+
+- include formatter on hex release ([#139](https://github.com/cloudwalk/hermes-mcp/issues/139)) ([d91b244](https://github.com/cloudwalk/hermes-mcp/commit/d91b244aeed4211a6653a82705b03da2247db9a3))
+
+## [0.10.2](https://github.com/cloudwalk/hermes-mcp/compare/v0.10.1...v0.10.2) (2025-06-23)
+
+### Bug Fixes
+
+- default implementation for server handle_notification ([#135](https://github.com/cloudwalk/hermes-mcp/issues/135)) ([c958041](https://github.com/cloudwalk/hermes-mcp/commit/c9580410162c31a62190631f6702024ea3458beb))
+
+### Code Refactoring
+
+- cleaner peri integration ([#137](https://github.com/cloudwalk/hermes-mcp/issues/137)) ([43226cc](https://github.com/cloudwalk/hermes-mcp/commit/43226cc9fb2f49edfbf8685fe181eb3093304308)), closes [#123](https://github.com/cloudwalk/hermes-mcp/issues/123)
+
+## [0.10.1](https://github.com/cloudwalk/hermes-mcp/compare/v0.10.0...v0.10.1) (2025-06-21)
+
+### Bug Fixes
+
+- client should send both sse/json headers on POST requests ([#134](https://github.com/cloudwalk/hermes-mcp/issues/134)) ([e906b7f](https://github.com/cloudwalk/hermes-mcp/commit/e906b7f02bf390faecc2b6bd39aab05ef9c500b1))
+- correctly allows macro-based/callback-based server implementations ([#131](https://github.com/cloudwalk/hermes-mcp/issues/131)) ([d7bfc75](https://github.com/cloudwalk/hermes-mcp/commit/d7bfc7541a8c381573f1a20ebc37d4a7dbaaa139))
+- remove last uses of hard-coded Anubis.Server.Registry ([cc0ffd9](https://github.com/cloudwalk/hermes-mcp/commit/cc0ffd95fce771a9c861c6859124dcedb6ceb88e))
+
+## [0.10.0](https://github.com/cloudwalk/hermes-mcp/compare/v0.9.1...v0.10.0) (2025-06-18)
+
+### Features
+
+- batch operations on server-side ([#125](https://github.com/cloudwalk/hermes-mcp/issues/125)) ([28eea7c](https://github.com/cloudwalk/hermes-mcp/commit/28eea7cd15f72c4effccc8475e6b301b2cd9745c))
+- missing notifications handlers ([#129](https://github.com/cloudwalk/hermes-mcp/issues/129)) ([34d5934](https://github.com/cloudwalk/hermes-mcp/commit/34d593499fdd846f430b93b4c52ca986f345646d))
+- support batch operations on client side ([#101](https://github.com/cloudwalk/hermes-mcp/issues/101)) ([fadf28d](https://github.com/cloudwalk/hermes-mcp/commit/fadf28d80068f3f1e77835fd46a276338048f0bc))
+- tools annotations ([#127](https://github.com/cloudwalk/hermes-mcp/issues/127)) ([c83e8f1](https://github.com/cloudwalk/hermes-mcp/commit/c83e8f1b0e721b1a03960ac67cdd0774337675dc))
+
+### Miscellaneous Chores
+
+- release please correct version on readme ([#128](https://github.com/cloudwalk/hermes-mcp/issues/128)) ([d0125c6](https://github.com/cloudwalk/hermes-mcp/commit/d0125c664b5190b560bb988ff01d17cbdba814bd))
+- update peri ([#126](https://github.com/cloudwalk/hermes-mcp/issues/126)) ([7292615](https://github.com/cloudwalk/hermes-mcp/commit/7292615cf57da0185006df2f6221f8ab93aacd30))
+
+## [0.9.1](https://github.com/cloudwalk/hermes-mcp/compare/v0.9.0...v0.9.1) (2025-06-13)
+
+### Bug Fixes
+
+- allow enum specific type on json-schema ([#121](https://github.com/cloudwalk/hermes-mcp/issues/121)) ([23c9ce2](https://github.com/cloudwalk/hermes-mcp/commit/23c9ce2081ed1099ce1f3afbd9318c8a02480039)), closes [#114](https://github.com/cloudwalk/hermes-mcp/issues/114)
+- correctly escape quoted expressions ([#119](https://github.com/cloudwalk/hermes-mcp/issues/119)) ([0c469c5](https://github.com/cloudwalk/hermes-mcp/commit/0c469c552d8d5fd2498706b4b1f41100e8561e2f)), closes [#118](https://github.com/cloudwalk/hermes-mcp/issues/118)
+
+## [0.9.0](https://github.com/cloudwalk/hermes-mcp/compare/v0.8.2...v0.9.0) (2025-06-12)
+
+### Features
+
+- add independently configurable logs ([#113](https://github.com/cloudwalk/hermes-mcp/issues/113)) ([bb0be27](https://github.com/cloudwalk/hermes-mcp/commit/bb0be2716ac41bf43814a16497b209fa55cc811b))
+
+### Bug Fixes
+
+- allow registering a name for the client supervisor ([#117](https://github.com/cloudwalk/hermes-mcp/issues/117)) ([d356511](https://github.com/cloudwalk/hermes-mcp/commit/d356511e2fbcf47b6a85ed733671e96d800ac693))
+
+## [0.8.2](https://github.com/cloudwalk/hermes-mcp/compare/v0.8.1...v0.8.2) (2025-06-11)
+
+### Code Refactoring
+
+- higher-level client implementation ([#111](https://github.com/cloudwalk/hermes-mcp/issues/111)) ([5de2162](https://github.com/cloudwalk/hermes-mcp/commit/5de2162b166e390b4dacfd7b9960fab59c81b4d7))
+
+## [0.8.1](https://github.com/cloudwalk/hermes-mcp/compare/v0.8.0...v0.8.1) (2025-06-10)
+
+### Bug Fixes
+
+- anubis should respect mix releases startup ([#109](https://github.com/cloudwalk/hermes-mcp/issues/109)) ([f42d476](https://github.com/cloudwalk/hermes-mcp/commit/f42d476e1dc05c57479170bd58aaca9028ef1e66))
+
+## [0.8.0](https://github.com/cloudwalk/hermes-mcp/compare/v0.7.0...v0.8.0) (2025-06-10)
+
+### Features
+
+- inject user and transport data on mcp server frame ([#106](https://github.com/cloudwalk/hermes-mcp/issues/106)) ([feb2ce3](https://github.com/cloudwalk/hermes-mcp/commit/feb2ce308e9fd0cde4118b294dd47ce64d8db18f))
+- legacy sse server transport ([#102](https://github.com/cloudwalk/hermes-mcp/issues/102)) ([4a71088](https://github.com/cloudwalk/hermes-mcp/commit/4a71088713071a726bde03bf1385c3c794d2134b))
+
+### Bug Fixes
+
+- allow empty capabilities on incoming JSON-RPC messages ([#105](https://github.com/cloudwalk/hermes-mcp/issues/105)) ([f0ad4cf](https://github.com/cloudwalk/hermes-mcp/commit/f0ad4cf1a5a85cc8a56baed875d2d2d200bb5860)), closes [#96](https://github.com/cloudwalk/hermes-mcp/issues/96)
+
+### Miscellaneous Chores
+
+- release please should include all files ([#108](https://github.com/cloudwalk/hermes-mcp/issues/108)) ([d0a25b9](https://github.com/cloudwalk/hermes-mcp/commit/d0a25b968c83ae1023ffffc8ee07b5b490122c03))
+
+## [0.7.0](https://github.com/cloudwalk/hermes-mcp/compare/v0.6.0...v0.7.0) (2025-06-09)
+
+### Features
+
+- allow json schema fields on tools/prompts definition ([#99](https://github.com/cloudwalk/hermes-mcp/issues/99)) ([0345f12](https://github.com/cloudwalk/hermes-mcp/commit/0345f122484a0169645c5da07e50c2d64fd6c5f5))
+
+## [0.6.0](https://github.com/cloudwalk/hermes-mcp/compare/v0.5.0...v0.6.0) (2025-06-09)
+
+### Features
+
+- allow customize server registry impl ([#94](https://github.com/cloudwalk/hermes-mcp/issues/94)) ([f3ac087](https://github.com/cloudwalk/hermes-mcp/commit/f3ac08749a7c361466a7a619f9782e8d8706a7b6))
+- mcp high level server components definition ([#91](https://github.com/cloudwalk/hermes-mcp/issues/91)) ([007f41d](https://github.com/cloudwalk/hermes-mcp/commit/007f41d33874fd9f1b5e340ecbe16317dc3576b7))
+- mcp server handlers refactored ([#92](https://github.com/cloudwalk/hermes-mcp/issues/92)) ([e213e04](https://github.com/cloudwalk/hermes-mcp/commit/e213e046b1360b24ff9e42835cdf80f5fe2ae4fa))
+
+### Bug Fixes
+
+- correctly handle mcp requests on phoenix apps ([#88](https://github.com/cloudwalk/hermes-mcp/issues/88)) ([09f4235](https://github.com/cloudwalk/hermes-mcp/commit/09f42359f0daac694013f0be4f6a74de2be7f4ff)), closes [#86](https://github.com/cloudwalk/hermes-mcp/issues/86)
+
+### Miscellaneous Chores
+
+- upcate automatic version ([#98](https://github.com/cloudwalk/hermes-mcp/issues/98)) ([0c08233](https://github.com/cloudwalk/hermes-mcp/commit/0c08233371338af24ea66047b4e1a8e9fa5cb055))
+
+### Code Refactoring
+
+- tests ([#93](https://github.com/cloudwalk/hermes-mcp/issues/93)) ([ca31feb](https://github.com/cloudwalk/hermes-mcp/commit/ca31febee7aec1d45dcb32398b33228d1399ae39))
+
+## [0.5.0](https://github.com/cloudwalk/hermes-mcp/compare/v0.4.1...v0.5.0) (2025-06-05)
+
+### Features
+
+- client support new mcp spec ([#83](https://github.com/cloudwalk/hermes-mcp/issues/83)) ([73d14f7](https://github.com/cloudwalk/hermes-mcp/commit/73d14f77522cef0f7212230c05cdac23ee2d93e2))
+- enable log disabling ([#78](https://github.com/cloudwalk/hermes-mcp/issues/78)) ([fa1453f](https://github.com/cloudwalk/hermes-mcp/commit/fa1453fee9b015c0ad7f9ac223749a9c9f1fcf6a))
+- low level genservy mcp server implementation (stdio + stremable http) ([#77](https://github.com/cloudwalk/hermes-mcp/issues/77)) ([e6606b4](https://github.com/cloudwalk/hermes-mcp/commit/e6606b4d66a2d7ddeb6c32e0041c22d4f0036ac5))
+- mvp higher level mcp server definition ([#84](https://github.com/cloudwalk/hermes-mcp/issues/84)) ([a5fec1c](https://github.com/cloudwalk/hermes-mcp/commit/a5fec1c976595c3363d4eec83e0cbc382eac9207))
+
+### Code Refactoring
+
+- base mcp server implementation correctly uses streamable http ([#85](https://github.com/cloudwalk/hermes-mcp/issues/85)) ([29060fd](https://github.com/cloudwalk/hermes-mcp/commit/29060fd2d2e383c58c727a9085b30162c6b8179a))
+
+## [0.4.0](https://github.com/cloudwalk/hermes-mcp) - 2025-05-06
+
+### Added
+
+- Implemented WebSocket transport (#70)
+- Emit `telemetry` events (#54)
+- Implement client feature `completion` request (#72)
+- Implement client feature roots, server requests (#73)
+
+## [0.3.12](https://github.com/cloudwalk/hermes-mcp) - 2025-04-24
+
+### Fixed
+
+- Correctly handles "nested" timeouts (genserver vs MCP) (#71)
+
+## [0.3.11](https://github.com/cloudwalk/hermes-mcp) - 2025-04-17
+
+### Added
+
+- Improved core library logging and added verbosity level on interactive/CLI (#68)
+
+## [0.3.10](https://github.com/cloudwalk/hermes-mcp) - 2025-04-17
+
+### Fixed
+
+- Handle SSE ping and reconnect events from server (#65)
+
+## [0.3.9](https://github.com/cloudwalk/hermes-mcp) - 2025-04-15
+
+### Fixed
+
+- Improved and simplified SSE endpoint event URI merging (#64)
+
+### Added
+
+- Added internal client/transport state inspection on CLI/mix tasks (#61)
+
+## [0.3.8](https://github.com/cloudwalk/hermes-mcp) - 2025-04-10
+
+### Added
+
+- Created `Operation` struct to standardize client API calls (#56)
+- Fixed ERTS version to avoid release errors
+
+### Fixed
+
+- Resolved client timeout confusion by standardizing timeout handling (#42)
+
+## [0.3.7](https://github.com/cloudwalk/hermes-mcp) - 2025-04-01
+
+### Fixed
+
+- Client reinitialization from interactive CLI (#55)
+
+## [0.3.6](https://github.com/cloudwalk/hermes-mcp) - 2025-03-28
+
+### Added
+
+- New roadmap and protocol update proposal (#53)
+- Added documentation for the 2025-03-26 protocol update
+
+## [0.3.5](https://github.com/cloudwalk/hermes-mcp) - 2025-03-25
+
+### Documentation
+
+- Added Roadmap to README (#47)
+
+## [0.3.4](https://github.com/cloudwalk/hermes-mcp) - 2025-03-20
+
+### Added
+
+- `help` command and flag on the interactive CLI (#37)
+- improve SSE connection status on interactive task/cli (#37)
+
+## [0.3.3](https://github.com/cloudwalk/hermes-mcp) - 2025-03-20
+
+### Added
+
+- Client request cancellation support (#35)
+- Improved URI path handling for SSE transport (#36)
+- Enhanced interactive mix tasks for testing MCP servers (#34)
+
+## [0.3.2](https://github.com/cloudwalk/hermes-mcp) - 2025-03-19
+
+### Added
+
+- Ship static binaries to use anubis-mcp as standalone application
+
+## [0.3.1](https://github.com/cloudwalk/hermes-mcp) - 2025-03-19
+
+### Added
+
+- Ship interactive mix tasks `stdio.interactive` and `sse.interactive` to test MCP servers
+
+## [0.3.0](https://github.com/cloudwalk/hermes-mcp) - 2025-03-18
+
+### Added
+
+- Structured server-client logging support (#27)
+- Progress notification tracking (#26)
+- MCP domain model implementation (#28)
+- Comprehensive SSE unit tests (#20)
+- Centralized state management (#31)
+- Standardized error response handling (#32)
+
+### Fixed
+
+- Improved domain error handling (#33)
+
+## [0.2.3](https://github.com/cloudwalk/hermes-mcp) - 2025-03-12
+
+### Added
+
+- Enhanced SSE transport with graceful shutdown capabilities (#25)
+- Improved SSE streaming with automatic reconnection handling (#25)
+
+## [0.2.2](https://github.com/cloudwalk/hermes-mcp) - 2025-03-05
+
+### Added
+
+- Support for multiple concurrent client <> transport pairs (#24)
+- Improved client resource management
+
+## [0.2.1](https://github.com/cloudwalk/hermes-mcp) - 2025-02-28
+
+### Added
+
+- Support for custom base and SSE paths in HTTP/SSE client (#19)
+- Enhanced configuration options for SSE endpoints
+
+## [0.2.0](https://github.com/cloudwalk/hermes-mcp) - 2025-02-27
+
+### Added
+
+- Implemented HTTP/SSE transport (#7)
+  - Support for server-sent events communication
+  - HTTP client integration for MCP protocol
+  - Streaming response handling
+
+### Documentation
+
+- Extensive guides and documentation improvements
+
+## [0.1.0](https://github.com/cloudwalk/hermes-mcp) - 2025-02-26
+
+### Added
+
+- Implemented STDIO transport (#1) for MCP communication
+  - Support for bidirectional communication via standard I/O
+  - Automatic process monitoring and recovery
+  - Environment variable handling for cross-platform support
+  - Integration test utilities in Mix tasks
+
+- Created stateful client interface (#6)
+  - Robust GenServer implementation for MCP client
+  - Automatic initialization and protocol handshake
+  - Synchronous-feeling API over asynchronous transport
+  - Support for all MCP operations (ping, resources, prompts, tools)
+  - Proper error handling and logging
+  - Capability negotiation and management
+
+- Developed JSON-RPC message parsing (#5)
+  - Schema-based validation of MCP messages
+  - Support for requests, responses, notifications, and errors
+  - Comprehensive test suite for message handling
+  - Encoding/decoding functions with proper validation
+
+- Established core architecture and client API
+  - MCP protocol implementation following specification
+  - Client struct for maintaining connection state
+  - Request/response correlation with unique IDs
+  - Initial transport abstraction layer
+
+### Documentation
+
+- Added detailed RFC document describing the library architecture
+- Enhanced README with project overview and installation instructions

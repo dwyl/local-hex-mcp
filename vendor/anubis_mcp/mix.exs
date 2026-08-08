@@ -1,0 +1,168 @@
+defmodule Anubis.MixProject do
+  use Mix.Project
+
+  @version "2.0.0"
+  @source_url "https://github.com/zoedsoupe/anubis-mcp"
+
+  def project do
+    [
+      app: :anubis_mcp,
+      version: @version,
+      elixir: "~> 1.18",
+      start_permanent: Mix.env() == :prod,
+      deps: deps(),
+      docs: docs(),
+      package: package(),
+      description: description(),
+      elixirc_paths: elixirc_paths(Mix.env()),
+      aliases: aliases(),
+      dialyzer: [
+        plt_local_path: "priv/plts",
+        ignore_warnings: ".dialyzerignore.exs",
+        plt_add_apps: [:mix, :ex_unit]
+      ],
+      extra_applications: [:observer, :wx]
+    ]
+  end
+
+  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(_), do: ["lib"]
+
+  # Run "mix help compile.app" to learn about applications.
+  def application do
+    [
+      extra_applications: [:logger]
+    ]
+  end
+
+  def cli do
+    [
+      preferred_envs: [dialyzer: :test]
+    ]
+  end
+
+  # Run "mix help deps" to learn about dependencies.
+  defp deps do
+    [
+      {:finch, "~> 0.19"},
+      {:peri, "0.9.0"},
+      {:telemetry, "~> 1.2"},
+      {:redix, "~> 1.5", optional: true},
+      {:gun, "~> 2.2", optional: true},
+      {:plug, "~> 1.18", optional: true},
+      {:jose, "~> 1.11.7", optional: true},
+      {:mox, "~> 1.2", only: :test},
+      {:mimic, "~> 2.0", only: :test},
+      {:bypass, "~> 2.1", only: :test},
+      {:cowboy, "~> 2.10", only: :test},
+      {:styler, "~> 1.4", only: [:dev, :test], runtime: false},
+      {:ex_doc, ">= 0.0.0", only: [:dev, :test], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.3", only: [:dev, :test], runtime: false}
+    ]
+  end
+
+  defp package do
+    %{
+      licenses: ["LGPL-3.0"],
+      contributors: ["zoedsoupe"],
+      links: %{
+        "GitHub" => @source_url,
+        "Docs" => "https://hexdocs.pm/anubis_mcp"
+      },
+      files: ~w[lib mix.exs README.md CHANGELOG.md LICENSE .formatter.exs]
+    }
+  end
+
+  defp aliases do
+    [
+      setup: ["deps.get", "compile --force"],
+      lint: ["format --check-formatted", "credo --strict", "dialyzer"],
+      format_doc: ["cmd npx prettier -w ./**/*.md"]
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      before_closing_head_tag: &before_closing_head_tag/1,
+      extras: [
+        "README.md",
+        "pages/introduction.md",
+        "pages/building-a-server.md",
+        "pages/building-a-client.md",
+        "pages/transports.md",
+        "pages/authorization.md",
+        "pages/testing.md",
+        "pages/recipes.md",
+        "pages/cheatsheet.cheatmd",
+        "CHANGELOG.md",
+        "CONTRIBUTING.md",
+        "LICENSE"
+      ],
+      groups_for_extras: [
+        "Getting Started": [
+          "README.md",
+          "pages/introduction.md"
+        ],
+        Guides: [
+          "pages/building-a-server.md",
+          "pages/building-a-client.md",
+          "pages/transports.md",
+          "pages/authorization.md",
+          "pages/testing.md"
+        ],
+        "Patterns & Reference": [
+          "pages/recipes.md",
+          "pages/cheatsheet.cheatmd"
+        ],
+        "Project Info": [
+          "CHANGELOG.md",
+          "CONTRIBUTING.md",
+          "LICENSE"
+        ]
+      ]
+    ]
+  end
+
+  defp before_closing_head_tag(:html) do
+    """
+    <script defer src="https://cdn.jsdelivr.net/npm/mermaid@10.2.3/dist/mermaid.min.js"></script>
+    <script>
+    let initialized = false;
+
+    window.addEventListener("exdoc:loaded", () => {
+    if (!initialized) {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: document.body.className.includes("dark") ? "dark" : "default"
+      });
+      initialized = true;
+    }
+
+    let id = 0;
+    for (const codeEl of document.querySelectorAll("pre code.mermaid")) {
+      const preEl = codeEl.parentElement;
+      const graphDefinition = codeEl.textContent;
+      const graphEl = document.createElement("div");
+      const graphId = "mermaid-graph-" + id++;
+      mermaid.render(graphId, graphDefinition).then(({svg, bindFunctions}) => {
+        graphEl.innerHTML = svg;
+        bindFunctions?.(graphEl);
+        preEl.insertAdjacentElement("afterend", graphEl);
+        preEl.remove();
+      });
+    }
+    });
+    </script>
+    """
+  end
+
+  defp before_closing_head_tag(:epub), do: ""
+
+  defp description do
+    """
+    Model Context Protocol (MCP) implementation in Elixir with Phoenix integration
+    """
+  end
+end
