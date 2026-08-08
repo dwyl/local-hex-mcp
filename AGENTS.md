@@ -55,7 +55,11 @@
 
 - **`search_hex_packages`**: Search Hex.pm package names, descriptions, and download stats.
 
-- **`search_github_issues`**: Search open/closed GitHub issues and PRs within an organization (e.g. `org: "phoenixframework"`).
+- **`search_github_issues`**: live search of GitHub issues **and pull requests**, open and closed. Pass `repo` as `owner/name` when you know the library's repository — it is strictly narrower than `org` and returns less noise; pass `org` when the repository is unknown or the question spans several. One of the two is required. `type` (`issue` / `pr`) is optional and omitting it — searching both — is almost always what you want. `limit` defaults to 10 and accepts 1-50; issue bodies come back up to 1500 characters, marked `…[truncated]` when cut.
+  - **Execute BEFORE theorising, not after.**
+    1. **A dependency behaves unexpectedly**: search its repository before building an explanation. Do not filter to open issues. A *closed* issue plus its merged PR tells you what the maintainer has already accepted as a bug, which is the difference between filing a feature request and pointing at a fix that missed one code path.
+    2. **You found a bug in one code path**: search for the same bug in the sibling paths — transports, adapters, backends, storage engines. They are written at different times by different people, so a fix applied to one is routinely absent from the others, and that framing is what makes a patch easy to accept.
+    3. **Prefer `gh` when the CLI is available**: `gh search issues --repo owner/name --state all "…"` is faster and needs no round trip through this server. This tool exists for when `gh` is absent or unauthenticated — and because a tool in the list gets reached for, while a shell command has to be remembered.
 
 ## Running the server
 
