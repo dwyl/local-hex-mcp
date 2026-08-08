@@ -3,8 +3,21 @@ import Config
 config :stdio_mcp,
   ecto_repos: [StdioMcp.Repo]
 
-# config :nx, default_backend: EMLX.Backend
-config :nx, default_backend: EXLA.Backend
+# Backend and defn compiler are decided together: a config where tensors live in
+# MLX memory while defn compiles with XLA is not a fallback, it is a third thing
+# that nobody tested. Deriving both from one branch makes them unable to disagree
+# — they previously did, because the second check read `:uinx`, so macOS silently
+# got the EMLX backend with the EXLA compiler.
+{nx_backend, nx_compiler} =
+  if :os.type() == {:unix, :darwin},
+    do: {{EMLX.Backend, device: :gpu}, EMLX},
+    else: {EXLA.Backend, EXLA}
+
+config :nx, default_backend: nx_backend
+
+config :nx, :default_defn_options, compiler: nx_compiler
+
+# config :nx, default_backend: EXLA.Backend
 
 # source: https://micrologics.org/blog/sqlite-in-production-optimizing-wal-mode-concurrency-and-vfs-layers-for-low-latency-app-servers
 config :stdio_mcp, StdioMcp.Repo,

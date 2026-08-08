@@ -79,9 +79,9 @@ Launch `mix mcp.server` through a shell that changes directory first:
 
 - **Claude Code**: Has no `cwd` field in `.mcp.json` — any `cwd` key is ignored, so the server inherits the directory Claude was launched from. `sh -c "cd ... && exec ..."` is required so `mix` finds `mix.exs`.
 
-### Antigravity CLI (`.agents/mcp_config.json`)
+### Antigravity CLI (`~/.gemini/config/mcp_config.json` or `.agents/plugins/<name>/mcp_config.json`)
 
-Antigravity supports `cwd` natively:
+Antigravity loads MCP configs from global configuration (`~/.gemini/config/mcp_config.json`) or workspace plugins (`.agents/plugins/<name>/mcp_config.json`). Antigravity supports `cwd` natively:
 
 ```json
 "hex_local": {

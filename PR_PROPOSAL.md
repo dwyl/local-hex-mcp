@@ -1,215 +1,139 @@
-# PR Proposal: Improve MCP Client Interoperability, Discovery, and Stdio Pipe Line-Buffering
+# PR Proposal: stdio should reply to requests it cannot decode
 
-## Motivation
+## Problem
 
-anubis_mcp is a fantastic Elixir implementation of the Model Context Protocol. However, when connecting servers over stdio with diverse MCP client runtimes (such as Google Antigravity CLI (agy), custom TypeScript/Go SDK integrations, and AI IDE extensions), servers fail to connect or hang indefinitely due to four interoperability bottlenecks:
+`Anubis.MCP.Message.decode/1` returns `{:error, :method_not_found}` for a request
+whose method is not in `protocol_module.request_methods()`. The two server
+transports then diverge:
 
-1. **Strict Initialization Request Matching**: In `Anubis.Server.Session.handle_request/4`, params is matched strictly requiring top-level `"clientInfo"` and `"capabilities"` keys. Clients sending minimal initialization parameters or nesting metadata inside `_meta` (e.g. `_meta.io.modelcontextprotocol/...`) trigger a runtime `MatchError`. Because the session GenServer crashes silently without returning a JSON-RPC response, the client hangs waiting for a handshake response.
+| Transport | On `{:error, :method_not_found}` |
+| :--- | :--- |
+| `StreamableHTTP.Plug` | replies `-32601`, id recovered from the body |
+| `STDIO` | logs `parse_error` and returns — **nothing is written** |
 
-2. **Unrecognized Initial Method (`server/discover`) and Notification Variant (`initialized`)**:
-   - Advanced agent runtimes and ACP/MCP bridges use `"method": "server/discover"` during startup capability negotiation before invoking standard tools. anubis_mcp rejected this with `:method_not_found`.
-   - Certain client SDKs emit `"method": "initialized"` instead of `"method": "notifications/initialized"`, which was also rejected with `:method_not_found`.
+A request carrying an `id` therefore gets no response over stdio. That is a
+JSON-RPC violation on its own, and from the client's side it is
+indistinguishable from a server that has hung.
 
-3. **Trapped Response Bytes over Non-TTY Stdio Pipes**: When an MCP server runs as a child process spawned over OS pipes (e.g., via Node.js `child_process.spawn` or Go `os/exec`), Erlang's `:standard_io` defaults to block buffering instead of line buffering. Small initial JSON-RPC responses (~100-300 bytes) stay trapped in BEAM's memory buffer until filled, causing client connection timeouts.
+## Why it shows up now
 
-4. **Crash on Unsupported Protocol Version**: `Anubis.Protocol.Registry.negotiate/2` can return bare `:error` when the client requests an unknown protocol version. The current code uses a bare `=` match which crashes the session GenServer with `MatchError` — no JSON-RPC error is returned, and the client hangs indefinitely.
+anubis 2.x supports 2025-03-26 through 2025-11-25. The **2026-07-28** spec
+retires the `initialize` handshake and has clients probe a new `server/discover`
+method first, **falling back to `initialize` against older servers**.
 
----
+That fallback is the correct interop story and it needs no changes here — but it
+never fires, because the probe gets silence instead of an error. A client that
+asks a question this server cannot answer is left waiting rather than told
+"unknown method".
 
-## Background: Standard MCP vs. Discovery Runtimes
+Note this affects only clients that *ask*. Claude Code sends `initialize`
+directly and never touches the path, which is why the bug has stayed invisible.
 
-Understanding the difference between standard MCP clients (like Claude Code) and discovery-based agent runtimes (like Google Antigravity `agy` or multi-agent bridges) helps clarify why these patches are necessary:
+## Reproduction
 
-| Feature | Standard MCP Client (Claude Code) | Discovery-Based Runtime (Antigravity `agy`, ACP Bridges) |
-| :--- | :--- | :--- |
-| **Initial Method** | `"initialize"` | `"server/discover"` (followed by `"initialize"`) |
-| **Params Layout** | Top-level keys (`params.clientInfo`) | Nested metadata (`params._meta["io.modelcontextprotocol/clientInfo"]`) |
-| **Protocol Marker** | Standard version (e.g. `"2024-11-05"`) | Future/Custom marker (e.g. `"2026-07-28"`) |
-| **Notification** | `"notifications/initialized"` | `"initialized"` (bare variant) |
-| **Target Architecture** | 1-to-1 static tool server | Dynamic multi-agent, sidecar, and proxy bridge discovery |
+Google Antigravity CLI (`antigravity-client v1.0.0`, announcing `2026-07-28`),
+stdio, anubis 2.0.0. Three consecutive attempts, identical:
 
-`anubis_mcp` was designed around standard MCP. These patches generalize the server so it seamlessly serves both standard MCP clients and modern discovery-based agent runtimes without breaking backward compatibility.
-
----
-
-## Patches
-
-### Patch 1: Enforce Line-Buffering on Stdio Transport
-
-**File**: `lib/anubis/server/transport/stdio.ex`
-
-Set `line_buffer: true` when configuring the `:io_device` options so JSON-RPC response lines flush immediately across non-TTY OS pipes. Also use `opts.io_device` explicitly instead of the implicit default:
-
-```elixir
-# Before:
-with {:error, err} <- :io.setopts(encoding: :utf8) do
-
-# After:
-with {:error, err} <- :io.setopts(opts.io_device, encoding: :utf8, line_buffer: true) do
+```
+09:26:12.440  incoming (325 B)  server/discover
+09:26:12.445  parse_error :method_not_found        ← nothing written
+09:26:17.949  SIGTERM received - shutting down     ← client gave up, 5s later
 ```
 
-**Notes**:
-- `:io.setopts/2` with `line_buffer: true` may be silently ignored on older OTP (< 26) or on Windows. The `with {:error, ...}` pattern handles this gracefully.
+`initialize` is never sent. The client is waiting for a reply to request id 1.
 
----
+With the patch below, same client, same probe:
 
-### Patch 2: Resilience & Metadata Extraction in Session Initialize
-
-**File**: `lib/anubis/server/session.ex`
-
-Replace strict pattern matching in `handle_request/4` with resilient fallbacks that inspect both `_meta` (for ACP/discovery metadata) and top-level keys with safe defaults:
-
-```elixir
-# Before:
-%{
-  "clientInfo" => client_info,
-  "capabilities" => client_capabilities,
-  "protocolVersion" => requested_version
-} = params
-
-# After:
-meta = Map.get(params, "_meta", %{})
-
-client_info =
-  get_in(meta, ["io.modelcontextprotocol/clientInfo"]) ||
-    Map.get(params, "clientInfo", %{})
-
-client_capabilities =
-  get_in(meta, ["io.modelcontextprotocol/clientCapabilities"]) ||
-    Map.get(params, "capabilities", %{})
-
-requested_version =
-  get_in(meta, ["io.modelcontextprotocol/protocolVersion"]) ||
-    Map.get(params, "protocolVersion", "2024-11-05")
+```
+11:24:46.440   incoming (325 B)  server/discover
+11:24:46.445   parse_error :method_not_found       ← -32601 written
+11:24:46.4467  incoming (232 B)  initialize        ← fallback, 1.7 ms later
+11:24:46.4477  initializing, protocol 2025-11-25
+11:24:46.4479  notifications/initialized
+11:24:46.4481  tools/list (id 3)
 ```
 
-Also allow both `"notifications/initialized"` and `"initialized"` in notification dispatching:
+Session up, tools listed and callable. The client downgrades itself unaided: it
+advertises `2026-07-28` in `params._meta` on the probe, then requests
+`2025-11-25` outright in the fallback. The server needs to know nothing about
+2026-07-28 for this to work — only to say no.
 
-```elixir
-# Before:
-defp handle_notification(
-       %{"method" => "notifications/initialized"},
-       _transport_context,
-       %{server_module: module} = state
-     ) do
+## Patch
 
-# After:
-defp handle_notification(
-       %{"method" => method},
-       _transport_context,
-       %{server_module: module} = state
-     )
-     when method in ["notifications/initialized", "initialized"] do
+`lib/anubis/server/transport/stdio.ex`, plus `alias Anubis.MCP.Error`:
+
+```diff
+       {:error, reason} ->
+         Logging.transport_event("parse_error", %{reason: reason}, level: :error)
++        reply_error(data, reason, state)
+     end
+   end
+ 
++  # `Message.decode/1` rejects a request whose method the negotiated protocol
++  # version does not define, but stdio only logged it. A client probing for a
++  # method this server does not implement was left waiting on a request id that
++  # was never going to be answered. `StreamableHTTP.Plug` already replies here.
++  # Notifications carry no id and must stay unanswered.
++  defp reply_error(data, reason, state) when reason in [:method_not_found, :invalid_request] do
++    with {:ok, %{"id" => id} = message} when not is_nil(id) <- JSON.decode(data),
++         error = Error.protocol(reason, Map.take(message, ["method"])),
++         {:ok, encoded} <- Error.to_json_rpc(error, id) do
++      IO.write(state.io_device, encoded)
++    else
++      _ -> :ok
++    end
++  end
++
++  defp reply_error(_data, _reason, _state), do: :ok
++
+   defp process_message(message, %{server: server_module} = state) do
 ```
 
----
+### Notes
 
-### Patch 3: Register `server/discover` and `initialized` in Guards and Protocols
+- **One message per call.** `read_from_stdin/1` uses `IO.read(device, :line)`, so
+  `handle_incoming_data/2` always receives exactly one message. No splitting.
+- **`reason` comes from `decode/1`**, so there is no need to re-validate.
+- **Notifications stay silent.** No `id`, no reply — answering one would itself
+  violate JSON-RPC, and unknown notifications are routine.
+- **Malformed JSON stays silent.** No id is recoverable, so there is nothing to
+  answer. `StreamableHTTP.Plug` substitutes `ID.generate_error_id()` for a
+  missing id, inventing an id no client asked about; that is deliberately not
+  copied here, and may be worth revisiting on the HTTP side.
+- **`Message.encode_error/2` already appends the trailing newline**, so the
+  encoded string is written as-is.
+- The existing `parse_error` log line is untouched.
 
-**Files**: `lib/anubis/mcp/message.ex` and `lib/anubis/protocol/v2024_11_05.ex`
+### Verification
 
-1. Update guards in `lib/anubis/mcp/message.ex`:
+- Compiles clean against 2.0.0.
+- Unknown method with an id → `{"error":{"code":-32601,"data":{"method":"server/discover"},"message":"Method not found"},"id":1,"jsonrpc":"2.0"}`
+- Unknown notification → zero bytes written.
+- Malformed JSON → zero bytes written.
+- Clients that only send known methods never reach the branch; verified
+  unchanged against Claude Code on the same build.
 
-```elixir
-defguard is_initialize(data)
-         when is_request(data) and
-                (:erlang.map_get("method", data) == "initialize" or
-                   :erlang.map_get("method", data) == "server/discover")
+## Tests
 
-defguard is_initialize_lifecycle(data)
-         when (is_request(data) and
-                 (:erlang.map_get("method", data) == "initialize" or
-                    :erlang.map_get("method", data) == "server/discover")) or
-                (is_notification(data) and
-                   (:erlang.map_get("method", data) == "notifications/initialized" or
-                      :erlang.map_get("method", data) == "initialized"))
-```
+`test/anubis/server/transport/stdio_test.exs`, driving the transport with
+`StringIO` as `:io_device`:
 
-2. Register methods in `lib/anubis/protocol/v2024_11_05.ex` (propagates to all later versions via inheritance):
+- unknown method **with** an id → one `-32601`, `id` preserved, `data.method` set
+- unknown **notification** → nothing written
+- malformed JSON → nothing written, `parse_error` still logged
+- known method → unchanged, nothing extra written
 
-```elixir
-@request_methods ~w(
-  initialize server/discover ping
-  ...
-)
+## Deliberately not in this PR
 
-@notification_methods ~w(
-  notifications/initialized initialized notifications/cancelled
-  ...
-)
-```
-
----
-
-### Patch 4: Graceful Handling of Unsupported Protocol Versions
-
-**File**: `lib/anubis/server/session.ex`
-
-The `handle_request/4` clause for `initialize` uses a bare `=` match on `negotiate/2`, which crashes the session GenServer with `MatchError` if the client sends an unrecognized `protocolVersion`. The 2-arg `negotiate/2` returns bare `:error` on failure (when the resolved version isn't in the global registry).
-
-```elixir
-# Before:
-{:ok, protocol_version, protocol_module} =
-  Anubis.Protocol.Registry.negotiate(requested_version, state.supported_versions)
-
-# state update, logging, reply...
-
-# After:
-case Anubis.Protocol.Registry.negotiate(requested_version, state.supported_versions) do
-  {:ok, protocol_version, protocol_module} ->
-    state = %{
-      state
-      | protocol_version: protocol_version,
-        protocol_module: protocol_module,
-        client_info: client_info,
-        client_capabilities: client_capabilities,
-        init_meta: Map.get(params, "_meta", %{}),
-        initialized: true
-    }
-
-    maybe_persist_session(state)
-
-    result =
-      maybe_put_instructions(
-        %{
-          "protocolVersion" => protocol_version,
-          "serverInfo" => state.server_info,
-          "capabilities" => protocol_module.server_capabilities(state.capabilities)
-        },
-        state.instructions
-      )
-
-    Logging.server_event("initializing", %{
-      client_info: client_info,
-      client_capabilities: client_capabilities,
-      protocol_version: protocol_version,
-      session_id: state.session_id
-    })
-
-    Telemetry.execute(
-      Telemetry.event_server_response(),
-      %{system_time: System.system_time()},
-      %{method: "initialize", status: :success, client_info: client_info}
-    )
-
-    {:reply, {:ok, encode_reply(Message.build_response(result, request["id"]))}, state}
-
-  _error ->
-    error = Error.protocol(:invalid_request, %{
-      message: "Unsupported protocol version: #{requested_version}"
-    })
-
-    {:reply, {:ok, encode_reply(Error.build_json_rpc(error, request["id"]))}, state}
-end
-```
-
-**Why**: The `MatchError` crash kills the session GenServer silently — no response is sent, the client hangs indefinitely. The fix returns a proper JSON-RPC `-32600 Invalid Request` error with a descriptive message, keeping the session alive for a potential retry.
-
----
-
-## Summary of Benefits
-
-- **100% Client Compatibility**: Works out of the box with Claude Code, Cursor, Google Antigravity CLI (agy), and custom SDK clients.
-- **Zero Connection Hangs**: `line_buffer: true` guarantees instant JSON-RPC delivery across stdio pipes.
-- **No Unhandled MatchErrors**: Non-standard or minimal initialization request parameters are handled gracefully with fallback defaults.
-- **Proper Error Reporting**: Unsupported protocol versions return a JSON-RPC error instead of silently crashing the session.
+- **`server/discover` support.** Adding it to `request_methods/0` and letting the
+  initialize handler answer it does make 2026-spec clients connect, but it makes
+  a discovery probe establish a session (`initialized: true` without a
+  handshake) and claims a spec version the server does not implement. It also
+  turns out to be unnecessary: the client's own fallback works once it gets an
+  answer. `server/discover` belongs in a `V2026_07_28` module alongside the
+  `:stateless` era `Anubis.Protocol.Behaviour` already anticipates.
+- **Resilient params extraction in `Session.handle_request/4`.** The strict
+  destructure of `clientInfo` / `capabilities` / `protocolVersion` raises
+  `MatchError` and kills the session without a reply — the same "client hangs
+  because nobody answered" failure, reached another way. Worth fixing, separate
+  PR.

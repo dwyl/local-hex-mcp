@@ -106,14 +106,55 @@ Recall is identical by construction, not by luck. What reranking buys is **symbo
 MRR, 0.92 → 1.00** — twelve identifier queries all landing at rank 1 — and +0.02
 on concepts.
 
+### Re-measured at top-5 on EMLX (Apple GPU), 3891 rows
+
+The table above is `limit 10` on the older 3967-row corpus. The current default
+regime — top-5, 15 per arm, rerank depth 10 — with `MiniLM-L4-v2` compiled by
+EMLX on the GPU rather than EXLA on CPU:
+
+```
+all (28)      recall@5   MRR@10      cand        ms
+rrf                 0.96      0.75      1.00        29
+rrf+rerank          0.96      0.78      1.00        90
+
+concept (16)  recall@5   MRR@10      cand        ms
+rrf                 0.94      0.63      1.00        42
+rrf+rerank          0.94      0.62      1.00       105
+
+symbol (12)   recall@5   MRR@10      cand        ms
+rrf                 1.00      0.92      1.00        23
+rrf+rerank          1.00      1.00      1.00        86
+```
+
+Two things this shows that the aggregate hides.
+
+**The MRR gain is entirely symbol queries.** +0.08 there, −0.01 on concepts. The
+headline +0.03 is an average of two opposite effects, and the class that most
+needs help — concepts, at MRR 0.62 — gets none. On 12 and 16 queries these are
+one or two documents moving a single rank, so the concept figure is "no gain",
+not "harm"; the symbol saturation is the more trustworthy of the two.
+
+**The stage costs 61–63ms, not ~250ms.** That is the EMLX/GPU figure. Measured
+in isolation the same serving runs 57.8ms median against EXLA's 246.1ms for a
+batch of 10 at sequence length 512, so the end-to-end delta agrees with the
+microbenchmark. The ~250ms figure quoted elsewhere in this file is EXLA on CPU
+and remains correct for Linux. Any latency claim about this stage has to name
+the backend.
+
+Conclusion is unchanged: **off**. A 3.1× slowdown for rank-within-the-payload is
+still a bad trade for a consumer that reads the whole payload — the cheaper stage
+does not make rank matter more.
+
 **Default: off.** `AI_RERANK_MODEL` unset means no model is loaded at all, which
 also removes a HuggingFace download and an EXLA compile from
 `Application.start/2` — they happened inside the window an MCP client waits for
 the server to come up, so a cold machine's first connection could time out and
 look broken.
 
-**If you want one: `MiniLM-L4-v2`.** +0.05 MRR for +250ms. Worth it only if
-something downstream reads position rather than the page.
+**If you want one: `MiniLM-L4-v2`.** +250ms on EXLA/CPU, +61ms on EMLX/Apple GPU.
+Worth it only if something downstream reads position rather than the page — and
+specifically only if it asks symbol-shaped questions, since that is where the
+whole gain lives.
 
 **Not bge.** It buys +0.01 MRR over L4 — a sixth of a rank — for another 1661ms.
 Its one real edge was strictness: on `"Building a Server"` it was the only model

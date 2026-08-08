@@ -51,13 +51,6 @@ defmodule StdioMcp.Application do
     end
   end
 
-  # defp set_backend() do
-  #   case :os.type() do
-  #     {:unix, :darwin} -> "EMLX"
-  #     _ -> "EXLA"
-  #   end
-  # end
-
   # Not every reranker on HuggingFace loads here: `Bumblebee.Text.cross_encoding`
   # needs an architecture Bumblebee implements with a sequence-classification
   # head, which rules out most of the current state of the art before quality
@@ -110,18 +103,35 @@ defmodule StdioMcp.Application do
   # that reads every row it is given before replying, so it does its own ranking
   # downstream and rank-within-the-payload is close to worthless; what it cannot
   # repair is a document that never arrives. Those are exactly the two columns
-  # reranking trades between:
+  # reranking trades between. End to end, 28 queries at top-5, rerank depth 10,
+  # 3891 rows, MiniLM-L4-v2 on EMLX/Apple GPU:
   #
-  #   rrf, no reranker, limit 10    recall 1.00   MRR 0.76    46ms
-  #   rrf, no reranker, limit  5    recall 0.96   MRR 0.76    44ms
-  #   rrf + MiniLM-L4,  limit  5    recall 0.96   MRR 0.81   294ms
-  #   rrf + TinyBERT-L2, limit 5    recall 0.93   MRR 0.81    69ms
+  #   slice          rrf                  rrf+rerank           rerank stage
+  #   all (28)       0.96  MRR 0.75       0.96  MRR 0.78          +61ms
+  #   concept (16)   0.94  MRR 0.63       0.94  MRR 0.62          +63ms
+  #   symbol (12)    1.00  MRR 0.92       1.00  MRR 1.00          +63ms
   #
-  # Returning ten unranked beats reranking five on the only axis that survives the
-  # consumer, at a sixth of the latency, and skipping the serving takes a ~100MB
-  # HuggingFace download and an EXLA compile out of `Application.start/2` — which
-  # happened inside the window an MCP client waits for the server to come up, so a
-  # cold machine's first connection could time out and look broken.
+  # `recall@5` is identical in every slice, and `cand` is 1.00 throughout: the
+  # stage cannot add a document, only reorder one already in the payload. That is
+  # by construction, not luck.
+  #
+  # The headline +0.03 MRR is an average over two opposite effects. Symbol queries
+  # saturate — twelve identifier queries all landing at rank 1 — while concept
+  # queries gain nothing, and on this run come out 0.01 lower. On 12 and 16
+  # queries those deltas are one or two documents moving a single rank, so read
+  # the concept figure as "no gain" rather than as harm. Either way it is the
+  # opposite of the intuition: the cross-encoder polishes the class that already
+  # worked and leaves the weak class exactly where it was.
+  #
+  # Latency is backend-dependent and the column above is Apple silicon. The same
+  # stage costs ~250ms under EXLA on CPU, which is what Linux sees — so total
+  # search goes 29ms -> 90ms here, and roughly 46ms -> 294ms there. Other models
+  # in the sweep have not been re-measured under EMLX.
+  #
+  # Skipping the serving also takes a ~100MB HuggingFace download and a compile
+  # out of `Application.start/2` — they happened inside the window an MCP client
+  # waits for the server to come up, so a cold machine's first connection could
+  # time out and look broken.
   #
   # The stage is kept, not deleted: a consumer that reads only the first result
   # wants it back, and it is one env var away. `Reranker.rerank/2` already gates
@@ -179,8 +189,15 @@ defmodule StdioMcp.Application do
       %Nx.Serving{} =
         serving =
         Bumblebee.Text.cross_encoding(model_info, tokenizer,
-          # defn_options: [compiler: EMLX],
-          defn_options: [compiler: EXLA],
+          # The `[]` default is load-bearing. `defn_options: nil` raises
+          # FunctionClauseError in `Nx.Serving.new/2`, and nothing here rescues
+          # it — the raise escapes `serving_reranker/1` past the `{:ok, _}` /
+          # `{:error, _}` case in `reranker_child/1` and takes down
+          # `Application.start/2`, so the server never boots. That is the same
+          # failure the model-loading comment above describes, reachable again
+          # through config: any environment where `:default_defn_options` is
+          # unset turns AI_RERANK_MODEL into "the MCP server will not start".
+          defn_options: Application.get_env(:nx, :default_defn_options, []),
           compile: [batch_size: 10, sequence_length: 512]
         )
 
