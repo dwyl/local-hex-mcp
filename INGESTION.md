@@ -29,7 +29,7 @@ query runs immediately. Only a miss reaches `IngestionJob.run/5`.
 {:ok, _} = Registry.register(@waiters, key, nil)
 ```
 
-This is first, and it has to be. If a caller started the job and *then*
+This has to be the first. If a caller started the job and *then*
 subscribed, a fast job could finish and `Registry.dispatch` to an empty waiter
 list — the result goes to nobody, and the caller that asked for it blocks until
 its timeout waiting for a message that was already sent. Subscribing first makes
@@ -56,10 +56,10 @@ end
 ```
 
 **This is the actual single-flight guarantee.** The unique registry makes the
-claim atomic, so exactly one task can hold the key no matter how many were
+claim *atomic*, so exactly one task can hold the key no matter how many were
 spawned. A losing task does no download, no embedding, and exits.
 
-Note what this buys: correctness does not depend on the step-3 lookup being
+You get correctness as it does not depend on the step-3 lookup being
 accurate. The lookup only avoids spawning a task that would immediately give up.
 
 **5. Caller B arrives.**
@@ -91,7 +91,7 @@ costs no extra time.
 
 **6. Both callers wait.**
 
-Each sits in `do_wait/4` with a monitor on the job and a deadline. Three ways out:
+Each `do_wait/4` with a monitor on the job and a deadline. Three ways out:
 
 - `{:ingestion_done, key, result}` — the result, not a signal to go re-read the
   database. The job broadcasts whatever `work.()` returned.
@@ -144,8 +144,7 @@ failure.
 ## Why the races are cheap here
 
 Four separate races appear above: subscribe-vs-dispatch, lookup-vs-spawn,
-claim-vs-claim, and result-vs-exit. Each is closed by something the runtime
-provides rather than something this code implements — an atomic registry insert,
+claim-vs-claim, and result-vs-exit.
+Each is closed by something the runtime provides, an atomic registry insert,
 process monitors, per-sender message ordering, and `try/after` running on any
-exit path. That is most of what a supervised BEAM process buys, and it is why
-the file is 169 lines and has no locks in it.
+exit path.
