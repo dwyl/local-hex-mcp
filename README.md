@@ -1,15 +1,22 @@
 # Local Stdio MCP Server
 
-A lightweight Elixir MCP server designed to run over `stdio` with a local SQLite database and an `AI_API_KEY`.
+A lightweight Elixir MCP server designed to run over `stdio` with a local SQLite database and an `AI_API_KEY`. It localises a search in the HexDocs of your favorite libraries.
+
+## Tools
+
+| Tool | Description |
+| ------ | ------------- |
+| `search_docs` | Search one Hex package's documentation, typespecs, guides and examples. `package` is required; ingests on demand. Results carry `hexdocs_url` and, for functions, a `source_url` pinned to the exact file, line and version |
+| `list_indexed_packages` | List indexed packages, versions, completeness, and the version this project depends on |
+| `search_hex_packages` | Find *which* package to use — Hex.pm names, descriptions, download counts |
+| `search_github_issues` | Live GitHub API search for issues and PRs in an organization (not indexed) |
+| `remember` | Save learnings to the local knowledge base. Takes `texts`, a list — batch a session's lessons into one call. AI assisted curation runs in the background and may merge, append to or discard what you send. |
+| `recall` | Search that knowledge base before re-investigating a failure |
+| `get_token_usage` | AI token consumption recorded locally, by model and date range |
+
+The `search_docs` searches against **HexDocs**. Ask a question about an Elixir package; the tool answers from the local index, or downloads and digests the package first if it is not indexed yet. A first-time ingestion of a large package may exceed one tool call — the payload then reports progress and the job continues in the background.
 
 > Why not just `grep deps/`? Because docs are generated from compiled modules, they show the API a macro produced — `grep` for `parse_options!/1` in `anubis_mcp` matches nothing, though it is called two lines below the `defschema` that makes it. And `grep` ranks nothing: it cannot connect "how do I avoid re-embedding" to the docs that say `chunk_overlap`.
-
-- `search_docs`: ask a question about an Elixir package; the tool answers from the local index, or downloads and digests the package first if it is not indexed yet. A first-time ingestion of a large package may exceed one tool call — the payload then reports progress and the job continues in the background.
-- `list_indexed_packages`: what is indexed, at which version, whether it is complete, and how that compares to the version this project depends on.
-- `remember`: save one or more learnings — takes a list, so a whole session's lessons go in a single call. AI assisted curation runs in the background and may merge, append to or discard what you send.
-- `recall`: check your knowledge database
-- `search_github_issues`: search a GitHub organization's issues and PRs, live. Not stored locally.
-- check your LLM helper consumption with `get_token_usage`.
 
 ## Tech
 
@@ -21,6 +28,8 @@ A lightweight Elixir MCP server designed to run over `stdio` with a local SQLite
 >[!IMPORTANT]
 > It uses AI support for computing embeddings and chat completions; you must provide an **AI_API_KEY** and three models.
 
+### Which tool uses which AI provider service?
+
  |Tool                                                        | Embeddings (/embeddings)                                   | Chat Model (/chat/completions) |
   |--|--|--|
   | search_docs                                                 | Yes (embed / embed_batch)                                  | No |
@@ -31,218 +40,74 @@ A lightweight Elixir MCP server designed to run over `stdio` with a local SQLite
 
 ## Features
 
-- **Hybrid search**: FTS5 and `vec_distance_cosine` retrieve in parallel, reciprocal rank fusion merges them. ~30ms; recall@10 is 1.00 on the eval set, which is why nothing ranks the pool afterwards.
-- **Curated knowledge memory**: submissions are embedded, compared to their nearest neighbours, and only then passed to a chat model that chooses `create`, `append`, `merge`, `replace`, `deprecate` or `discard`. `recall` uses the same hybrid retrieval as `search_docs` — FTS5 and cosine fused by RRF — and degrades to keyword-only when no embedding is available, so it still works with no API key.
 - **HexDocs ingestion**: fetches a package's docs tarball from Hex, extracts it in memory, and indexes it with embeddings on demand. One HTTP request per package, never a page-by-page crawl.
 - **Version-aware**: with `PROJECT_ROOT` set, `latest` resolves to whatever your project's `mix.lock` pins — any age, pre-releases included — falling back to Hex's latest stable when nothing local pins the package. One version per package is kept, so results never interleave versions.
+- **Hybrid search**: FTS5 and `vec_distance_cosine` retrieve in parallel, reciprocal rank fusion merges them. ~30ms; recall@10 is 1.00 on the eval set, which is why nothing ranks the pool afterwards.
+- **Curated knowledge memory**: submissions are embedded, compared to their nearest neighbours, and only then passed to a chat model that chooses `create`, `append`, `merge`, `replace`, `deprecate` or `discard`. The tool `recall` uses the same hybrid retrieval as `search_docs` — FTS5 and cosine fused by RRF — and degrades to keyword-only when no embedding is available, so it still works with no API key.
 - **GitHub issues** are queried live against the GitHub API and are *not* stored locally.
-
-## Tools
-
-| Tool | Description |
-| ------ | ------------- |
-| `search_docs` | Search one Hex package's documentation, typespecs, guides and examples. `package` is required; ingests on demand. Results carry `hexdocs_url` and, for functions, a `source_url` pinned to the exact file, line and version |
-| `list_indexed_packages` | List indexed packages, versions, completeness, and the version this project depends on |
-| `search_hex_packages` | Find *which* package to use — Hex.pm names, descriptions, download counts |
-| `search_github_issues` | Live GitHub API search for issues and PRs in an organization (not indexed) |
-| `remember` | Save learnings to the local knowledge base. Takes `texts`, a list — batch a session's lessons into one call |
-| `recall` | Search that knowledge base before re-investigating a failure |
-| `get_token_usage` | AI token consumption recorded locally, by model and date range |
 
 ## Quickstart
 
 ### Prerequisites
 
 - Elixir 1.20+
-- An AI API provider key. Mistral has a generous free tier and is the default, so the key alone is enough to start; any OpenAI-compatible `/embeddings` and `/chat/completions` endpoint works via `AI_API_URL`.
 
 SQLite needs no separate install — `ecto_sqlite3` bundles it — and neither does the vector extension: `sqlite_vec` ships the binary and `config/runtime.exs` loads it with `SqliteVec.path()`.
 
 ### Setup
 
-Three steps. Two directories are involved and mixing them up fails silently, so
-the distinction is worth holding on to from the start:
+⚠️ Two directories are involved and mixing them up fails silently
 
 | | what it is |
 | --- | --- |
-| **the clone** | this repo. The server process runs from here, because `mix` does not walk up directories looking for `mix.exs`. |
+| **the clone** | this repo. You build here; the resulting binary does not care where it is launched from. |
 | **your project** | the repo you are editing. The server reads its `mix.lock` to decide which version of a package to answer about. |
 
-**1. In the clone**
+**1. In the clone**:
 
 ```sh
+# database setup
 mix setup
-MIX_ENV=prod mix compile
+
+MIX_ENV=prod mix release
 ```
 
-`mix setup` runs `deps.get`, `ecto.create` and `ecto.migrate`. The database path
-is compiled in as `<the clone>/priv/mcp.db` — absolute, so it does not depend on
-where you run the command from, and the server opens the same file without being
-told. **Leave `DATABASE_PATH` unset** and setup and server cannot disagree.
+The database path is compiled in as `<the clone>/priv/mcp.db` — absolute, so it does not depend on where anything runs.
 
-⚠️ A wrong `DATABASE_PATH` does not fail loudly. The server starts, the tools
-list, and every query returns `no such table: package_docs` — currently wrapped
-in `isError: false`, so the session looks healthy while reading an empty
-database. If searches return nothing for packages you know are indexed, check the
-`database` field of `list_indexed_packages` before anything else.
+⚠️ If you ever want to change the DATABASE_PATH, it needs to be set for the clone **AND** in your project (the *.mcp.json* file)
+> It does not fail loudly. The server starts, the tools list, and every query returns `no such table: package_docs` — currently wrapped in `isError: false`, so the session looks healthy while reading an empty database. If searches return nothing for packages you know are indexed, check the `database` field of `list_indexed_packages` before anything else.
 
-`prod`, not `dev`: the MCP config runs `mix mcp.server --no-compile` under
-`MIX_ENV=prod`, so a `dev` build does not satisfy it. Repeat this step after *any*
-code change — and recompiling alone is not enough, the server must then be
-reconnected, because a running BEAM keeps the modules it already loaded.
+Rebuild with `mix release --overwrite` after changing code, then reconnect the client — a running BEAM keeps the modules it already loaded.
 
-**2. Get an API key**
+**2. Get an API key**:
 
-Any OpenAI-compatible provider works. Mistral is the default and has a free tier
-generous enough for this workload, so the key alone is enough to start; point
-`AI_API_URL` elsewhere if you prefer another one, or a local embedding server.
+Any OpenAI-compatible provider works but Mistral is the default since it has a free tier generous enough for this workload: the key alone `AI_API_KEY` is *enough* to start.
 
-**3. In your project**
+Any OpenAI-compatible `/embeddings` and `/chat/completions` endpoint works once you set `AI_API_URL`, `AI_EMBED_URL`, `AI_CHAT_URL`, `AI_EMBED_MODEL`, `AI_CHAT_MODEL_SMALL`, `AI_CHAT_MODEL_LARGE`.
 
-Copy two files into the repo you want to *use* the server from:
+> The `AI_API_KEY` is currently unique for /embeddings and /chat.
 
-- `CLAUDE.md` — or `AGENTS.md`, the same content under the name other assistants
-  read. This is what teaches the assistant that `package` is required, that a
-  multi-package question is several calls, and how to read `notices`. Without it
-  the tools work but are used badly.
-- `.mcp.example.json` → `.mcp.json` (Claude Code, Cursor), or
-  `.mcp_config.example.json` → the Antigravity config.
+**3. In your project**:
 
-Then edit **three values**, all in the `env` block:
+Copy two files `CLAUDE.md` — or `AGENTS.md` from the clone project into the repo you want to *use* the server from.
+This is what teaches the assistant that `package` is required, that a multi-package question is several calls, and how to read `notices`. Without it the tools work but are used badly.
 
-```json
-"MCP_CLONE":    "/absolute/path/to/local_hex_mcp",
-"AI_API_KEY":   "…",
-"PROJECT_ROOT": "/absolute/path/to/the/repo/you/are/editing"
-```
+Copy the config file `.mcp.example.json` → `.mcp.json`.
 
-`MCP_CLONE` is expanded by the `sh -c` wrapper, so the clone path appears once
-rather than in three places. `MCP_LOG_FILE` is relative and resolves against it.
-`DATABASE_PATH` is absent on purpose — it defaults to `<MCP_CLONE>/priv/mcp.db`,
-the same file `mix setup` just migrated.
-
-Antigravity is the one exception: it supports `cwd` natively, but `cwd` is a
-literal and cannot read `MCP_CLONE`, so the clone path goes there instead.
-
-⚠️ **Pointing `PROJECT_ROOT` at the clone is the easy mistake, and nothing
-reports it.** Version resolution then reads *this* project's lockfile and answers
-confidently about the wrong versions.
-
-The exception is working on `local_hex_mcp` itself, where the two directories are
-the same and `PROJECT_ROOT` may be omitted: resolution falls through to the
-versions loaded in the server's own BEAM, which are that project's. A mismatch
-between the index and your deps is then *reported* rather than corrected, and
-`:application.get_key/2` only sees started applications where `mix.lock` lists
-every one.
-
-> **One database is the normal case.** `PROJECT_ROOT` is per-project — each
-> project's `.mcp.json` names its own repo — but they can all share the default
-> database, and usually should: one `mix setup`, one index, no paths to keep in
-> sync. Only one version per package is kept, so the cost appears in exactly one
-> situation: two projects pinning *different* versions of the *same* package,
-> which then re-ingests on each switch. The search says so when it happens, and
-> the fix is a separate `DATABASE_PATH` for that project — set *both* there and
-> at `mix setup`, or you will migrate one file and read another.
-
-Everything else has a working default; `EMBED_BATCH_SIZE` and the rest are in
-[Configuration](#configuration) and only worth setting once something misbehaves.
-
-### AI Code Assistant Configuration
-
-Both files ship in this repo — copy the one your assistant reads, then edit only
-the values marked `<…>`.
-
-**Claude Code / Cursor** (`.mcp.example.json` → `.mcp.json`):
+Then ❇️ edit **three values** below in *.mcp.json*  placed in your project:
 
 ```json
 {
   "mcpServers": {
     "hex_local": {
-      "command": "sh",
-      "args": [
-        "-c",
-        "cd \"$MCP_CLONE\" && exec /opt/homebrew/bin/mix mcp.server --no-compile"
-      ],
-      "env": {
-        "MCP_CLONE": "<ABSOLUTE/PATH/TO/local_hex_mcp>",
-        "AI_API_KEY": "<YOUR-API-KEY>",
-        "PROJECT_ROOT": "<ABSOLUTE/PATH/TO/THE/REPO/YOU/ARE/EDITING>",
-
-        "MIX_ENV": "prod",
-        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "MCP_LOG_FILE": "tmp_logs.txt",
-        "MCP_LOG_LEVEL": "warning"
-      }
-    }
-  }
-}
-```
-
-Claude Code has **no `cwd` field** — any `cwd` key is ignored, so the server would
-inherit whatever directory Claude was launched from and `mix` would not find a
-`mix.exs`. The `sh -c` wrapper is what fixes that, and `exec` keeps the BEAM as
-the shell's own process so the client can signal it cleanly.
-
-`$MCP_CLONE` is expanded by that shell at spawn time, which is why the clone path
-is a variable here rather than pasted into the `cd`. `MCP_LOG_FILE` is relative
-and resolves against it.
-
-**Google Antigravity** (`.mcp_config.example.json` → `~/.gemini/config/mcp_config.json`,
-or `.agents/plugins/<name>/mcp_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "hex_local": {
-      "command": "/opt/homebrew/bin/mix",
-      "args": ["mcp.server", "--no-compile"],
-      "cwd": "<ABSOLUTE/PATH/TO/local_hex_mcp>",
-      "env": {
-        "AI_API_KEY": "<YOUR-API-KEY>",
-        "PROJECT_ROOT": "<ABSOLUTE/PATH/TO/THE/REPO/YOU/ARE/EDITING>",
-
-        "MIX_ENV": "prod",
-        "MIX_QUIET": "1",
-        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-        "MCP_LOG_FILE": "tmp_logs.txt",
-        "MCP_LOG_LEVEL": "warning"
-      }
-    }
-  }
-}
-```
-
-Antigravity supports `cwd` natively, so no wrapper is needed — but `cwd` is a
-literal path and cannot read `MCP_CLONE`, so the clone goes there instead of in
-the `env` block. Still three values to edit, just one of them a line higher.
-
-### Alternative: run a release
-
-A Mix release is already configured, and it works over stdio — verified by feeding
-a JSON-RPC `initialize` to the binary and getting a clean response on stdout. The
-release dispatches `elixir --no-halt` with `-noshell` but **not** `-noinput`, so
-the transport can still read stdin; `vm.args` adds nothing.
-
-Build it:
-
-```sh
-MIX_ENV=prod mix release --overwrite
-```
-
-Then point the client at the binary instead of at `mix`:
-
-```json
-{
-  "mcpServers": {
-    "hex_local": {
-      "command": "<ABSOLUTE/PATH/TO/local_hex_mcp>/_build/prod/rel/stdio_mcp/bin/stdio_mcp",
+      "command": "<ABSOLUTE/PATH/TO/THE/CLONE local_hex_mcp>/_build/prod/rel/stdio_mcp/bin/stdio_mcp",
       "args": ["start"],
       "env": {
         "AI_API_KEY": "<YOUR-API-KEY>",
         "PROJECT_ROOT": "<ABSOLUTE/PATH/TO/THE/REPO/YOU/ARE/EDITING>",
 
         "MCP_TRANSPORT": "stdio",
-        "MCP_LOG_FILE": "<ABSOLUTE/PATH/TO/local_hex_mcp>/tmp_logs.txt",
+        "MCP_LOG_FILE": "<ABSOLUTE/PATH/TO/THE/CLONE local_hex_mcp>/tmp_logs.txt",
         "MCP_LOG_LEVEL": "warning"
       }
     }
@@ -250,141 +115,44 @@ Then point the client at the binary instead of at `mix`:
 }
 ```
 
-**What drops out:** the `sh -c` wrapper and its `cd`, `MCP_CLONE`, `MIX_ENV`,
-`PATH`, and `--no-compile`. The release bundles its own ERTS, so it needs nothing
-from your shell and does not care what directory the client launched from — which
-is the entire reason the wrapper existed. The same config shape works for
-Antigravity, so the `cwd`-versus-`sh -c` split disappears too.
+Antigravity reads `~/.gemini/config/mcp_config.json`, or `.agents/plugins/<name>/mcp_config.json` for a workspace plugin. Same JSON either way — copy `.mcp.example.json`.
 
-**What you must add:** `MCP_TRANSPORT=stdio`. The `mix mcp.server` task sets this
-itself; a release does not, and without it `mcp_children/0` returns `[]` and you
-get a server with no MCP in it. `MCP_LOG_FILE` also has to be absolute now, since
-there is no `cd` to resolve a relative path against.
+`MCP_TRANSPORT=stdio` is required and already in the example — without it the server starts with no MCP in it (`mcp_children/0` returns `[]`).
 
-**What it costs — the edit loop.** `mix compile` no longer changes what the client
-runs. Rebuild with `mix release --overwrite` and reconnect, or the old release
-keeps serving happily. Two artifacts now exist and can disagree:
+⚠️ **Pointing `PROJECT_ROOT` at the clone is the easy mistake, and nothing reports it.** Version resolution then reads *this* project's lockfile and answers confidently about the wrong versions.
 
-```
-_build/prod/lib/   what mix docs.eval runs
-_build/prod/rel/   what the MCP server runs
-```
+> **One shared database is the normal case.**
 
-That combination can pass a verification and still serve stale code, so treat the
-release build as part of "applying code changes", not an afterthought.
+`PROJECT_ROOT` is per-project:
 
-**This release is machine-local, not portable.** `config/config.exs` computes the
-database path with `Path.expand("../priv/mcp.db", __DIR__)` at *compile* time, so
-the binary carries an absolute path from the machine that built it. That resolves
-correctly where it was built and nowhere else. Distributing it would mean
-resolving the path at runtime (`:filename.basedir(:user_data, ~c"hex_local")` or
-similar) and running migrations at boot, since `mix setup` does not exist in a
-release. Those two changes are the bulk of what packaging with Burrito would
-require; the release itself is the easy part.
+> - each project's `.mcp.json` names its own repo
+> - but they can all share the default database, and usually should
+> - Only one version per package is kept, so using different repos with different version will overwrite the related documentation (if search against).
 
-### Local embeddings
+### Developing on this server
 
-`AI_API_URL` addresses both `/embeddings` and `/chat/completions`, which assumes
-one provider serves both. A local embedding server does not: it has no chat
-route, so pointing `AI_API_URL` at it leaves `remember`'s curation calling a URL
-that 404s — and `memory_enabled?/0` only checks that a key and a model name are
-set, so it attempts the call rather than degrading. `AI_EMBED_URL` and
-`AI_CHAT_URL` override the shared value independently; both default to it, so a
-single provider still needs no extra configuration.
-
-[`text-embeddings-inference`](https://huggingface.co/docs/text-embeddings-inference)
-is in homebrew-core and exposes an OpenAI-compatible `/v1/embeddings`:
-
-```bash
-brew install text-embeddings-inference     # formula name
-text-embeddings-router --model-id Qwen/Qwen3-Embedding-0.6B --port 8081
-```
-
-The binary is `text-embeddings-router`, not the formula name. First run downloads
-the weights and does a warmup pass, both slow and both one-time.
+Running from source has a shorter loop than rebuilding a release, so use `mix`
+while you are changing the code:
 
 ```json
-"AI_EMBED_URL": "http://localhost:8081/v1",
-"AI_EMBED_MODEL": "Qwen/Qwen3-Embedding-0.6B",
-"AI_API_KEY": "-",
-"EMBED_BATCH_SIZE": "32",
-"EMBED_CONCURRENCY": "1",
-"EMBED_PAUSE_MS": "0"
+"command": "sh",
+"args": ["-c", "cd \"$MCP_CLONE\" && exec /opt/homebrew/bin/mix mcp.server --no-compile"],
+"env": {
+  "MCP_CLONE": "<ABSOLUTE/PATH/TO/local_hex_mcp>",
+  "MIX_ENV": "prod",
+  "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+  "…": "…"
+}
 ```
 
-**`EMBED_BATCH_SIZE` must not exceed TEI's `max_client_batch_size`** (32 by
-default, printed at startup). Oversized batches are rejected, and the automatic
-bisection will not rescue them: `token_overflow?/1` recognises the *provider's*
-token-limit shape, and a client-batch-size rejection is a different error, so the
-ingest aborts instead of halving. Match the two numbers.
+Then `MIX_ENV=prod mix compile` and reconnect, instead of `mix release
+--overwrite` and reconnect.
 
-`AI_API_KEY` only has to be non-empty; it is sent as a bearer token the local
-server ignores. Chat keeps going to whatever `AI_API_URL` names, so `remember`
-and `recall` are unaffected.
-
-Three things to expect:
-
-- **Switching embedders costs a full re-index**, and is refused until you run
-  one. `embedding_config` compares the *model name*, not the dimension, which
-  matters here: Qwen3-Embedding-0.6B is 1024-dim exactly like `mistral-embed`, so
-  nothing would raise and cosine would simply return noise. `mix docs.reindex` is
-  the supported path.
-- **The first ingest of a large package will not finish inside one tool call.**
-  That is the designed path, not a failure: the payload carries a
-  "still being indexed" notice, the job keeps running, and calling `search_docs`
-  again attaches to it. Drop `refresh: true` from the retry.
-- **Lower `EMBED_CONCURRENCY`, do not raise it, and do *not* set
-  `EMBED_PAUSE_MS` to zero.** Against a hosted provider the work is IO-bound and
-  concurrency hides latency; against a local server the server *is* the
-  bottleneck, so parallel requests only contend. `1` is the sensible value.
-
-  The pause is the subtler one. There is no rate limit to pace against, but TEI
-  processes sequentially on CPU whatever `max_concurrent_requests` claims, so
-  **during an ingest every search's query embedding queues behind the ingest
-  batches**. Measured on an M-series CPU with Qwen3-Embedding-0.6B: a 32-document
-  batch takes 8-17s of inference, and a query issued behind one waited 8.4s,
-  12.8s and 17.4s in `queue_time` for 48ms of its own compute. Long enough to
-  exceed the MCP transport's 30s ceiling. `EMBED_PAUSE_MS` around `200` yields
-  slots between batches so interactive searches get through; against a hosted
-  provider, where requests genuinely run in parallel, `0` remains right.
-
-Measured throughput on an M-series CPU (no Metal in the homebrew bottle):
-**~244 tokens/s**, so a 32-document batch is 8-17s and a full 3967-chunk reindex
-runs 25-30 minutes. That is a one-off, and it is the ingest side. **A single
-query embedding is ~48ms of inference**, comparable to a round trip to a hosted
-provider — search latency is not the thing to worry about here, contention is.
-
-Whether it is any *good* is measurable rather than arguable, and this is the
-argument for trying it: re-embedding locally is free, so `mix docs.eval` can
-compare embedders the way it compared retrieval strategies. The vector arm carries
-conceptual retrieval (concept recall 0.94 against FTS's 0.88) and concept MRR at
-0.65 is the weakest number in the table — the one axis never yet swept, because
-until now every attempt cost API spend.
-
-### Ingestion tuning
-
-Set in the `env` block of your MCP config; they take effect on a server restart, with no recompile. A malformed value falls back to the default rather than raising.
-
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `INGEST_TIMEOUT_MS` | `25000` | How long a search waits for an in-flight ingestion. Must stay **below** the MCP transport's request ceiling (Anubis' session call gives up at 30s), or the request dies before the progress notice can be returned. |
-| `EMBED_BATCH_SIZE` | `200` | Inputs per embeddings request. The provider limits *requests* per second, so larger batches reduce 429s. The real ceiling is tokens per request, but a token-limit rejection is bisected automatically, so this rarely needs tuning. |
-| `EMBED_CONCURRENCY` | `2` | Concurrent embedding requests. Bounded by the Finch pool and the provider's rate limit — not by CPU count; the work is IO-bound. |
-| `EMBED_PAUSE_MS` | `0` | Pause after each embedding request, for providers that limit requests per second. `0` means no pacing. Raise only if 429s persist after lowering concurrency. |
-
-Everything else the server reads:
-
-| Variable | Default | Notes |
-| --- | --- | --- |
-| $${\color{blue}\text{AI\_API\_KEY}}$$ | — | Required. `AI_API_URL` points at any OpenAI-compatible provider. |
-| $${\color{blue}\text{PROJECT\_ROOT}}$$ | unset | Required. The repo being edited — **not** this clone. |
-| DATABASE_PATH | `<this repo>/priv/mcp.db` | Leave it unset. The default is absolute and compiled in, so `mix setup` and the server agree by construction. Set it — in both places — only to give a project its own index. |
-| `AI_EMBED_MODEL` | `mistral-embed` | Changing it invalidates the whole index; `mix docs.reindex` is the supported path. |
-| `AI_CHAT_MODEL_SMALL` / `_LARGE` | `mistral-small-latest` / `mistral-medium-latest` | Structuring and curation for `remember`. |
-| `GITHUB_TOKEN` | unset | Raises the rate limit for `search_github_issues`. |
-| `MCP_LOG_FILE` / `MCP_LOG_LEVEL` | unset / `warning` | The only way to see anything: stderr is discarded by the client. |
-
-> Changing code requires `MIX_ENV=prod mix compile` **and** reconnecting the MCP server — recompiling alone does not reload modules into a running BEAM.
+⚠️ **Two build artifacts can disagree.** `mix compile` writes
+`_build/prod/lib`, which is what `mix docs.eval` and other Mix tasks run; `mix
+release` writes `_build/prod/rel`, which is what the binary serves. Verifying a
+fix with `docs.eval` therefore says nothing about the running server unless you
+rebuilt the release. Pick one path per session rather than mixing them.
 
 ### Telemetry
 
@@ -431,6 +199,31 @@ returns a clean human-friendly Markdown
 
 </details>  
 
+### Ingestion tuning
+
+Set in the `env` block of your MCP config; they take effect on a server restart, with no recompile. A malformed value falls back to the default rather than raising.
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `INGEST_TIMEOUT_MS` | `25000` | How long a search waits for an in-flight ingestion. Must stay **below** the MCP transport's request ceiling (Anubis' session call gives up at 30s), or the request dies before the progress notice can be returned. |
+| `EMBED_BATCH_SIZE` | `200` | Inputs per embeddings request. The provider limits *requests* per second, so larger batches reduce 429s. The real ceiling is tokens per request, but a token-limit rejection is bisected automatically, so this rarely needs tuning. |
+| `EMBED_CONCURRENCY` | `2` | Concurrent embedding requests. Bounded by the Finch pool and the provider's rate limit — not by CPU count; the work is IO-bound. |
+| `EMBED_PAUSE_MS` | `0` | Pause after each embedding request, for providers that limit requests per second. `0` means no pacing. Raise only if 429s persist after lowering concurrency. |
+
+Everything else the server reads:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| $${\color{blue}\text{AI\_API\_KEY}}$$ | — | Required. `AI_API_URL` points at any OpenAI-compatible provider. |
+| $${\color{blue}\text{PROJECT\_ROOT}}$$ | unset | Required. The repo being edited — **not** this clone. |
+| DATABASE_PATH | `<this repo>/priv/mcp.db` | Leave it unset. The default is absolute and compiled in, so `mix setup` and the server agree by construction. Set it — in both places — only to give a project its own index. |
+| `AI_EMBED_MODEL` | `mistral-embed` | Changing it invalidates the whole index; `mix docs.reindex` is the supported path. |
+| `AI_CHAT_MODEL_SMALL` / `_LARGE` | `mistral-small-latest` / `mistral-medium-latest` | Structuring and curation for `remember`. |
+| `GITHUB_TOKEN` | unset | Raises the rate limit for `search_github_issues`. |
+| `MCP_LOG_FILE` / `MCP_LOG_LEVEL` | unset / `warning` | The only way to see anything: stderr is discarded by the client. |
+
+> Changing code requires `MIX_ENV=prod mix compile` **and** reconnecting the MCP server — recompiling alone does not reload modules into a running BEAM.
+
 ### Optional: Litestream replication
 
 Replicate your SQLite database to cloud storage (S3, B2, etc.) for backup and portability.
@@ -440,15 +233,12 @@ Replicate your SQLite database to cloud storage (S3, B2, etc.) for backup and po
 
 ## Which version do you get?
 
-The server runs from *its own* directory, so `:application.get_key/2` reports the
-dependencies of `local_hex_mcp` and never the repo you are editing. Left at that,
-`latest` falls through to Hex's latest stable, which may be a different major
-line than your code compiles against — and nothing in the answer says so.
+The server runs from *its own* directory, so `:application.get_key/2` reports the dependencies of `local_hex_mcp` and never the repo you are editing.
+Left at that, `latest` falls through to Hex's latest stable, which may be a different major line than your code compiles against — and nothing in the answer says so.
 
-`PROJECT_ROOT` closes that. Point it at the repo you are working in and the
-server reads that project's `mix.lock` itself:
+`PROJECT_ROOT` closes that. Point it at the repo you are working in and the server reads that project's `mix.lock` itself:
 
-```
+```txt
 explicit version:  ->  $PROJECT_ROOT/mix.lock  ->  the server's own BEAM  ->  Hex latest stable
 ```
 
@@ -484,23 +274,19 @@ the answer must match your lockfile, or accept Hex latest stable.
 
 ## The embedding model is part of the index
 
-Every vector must come from the same model. Two models are never comparable:
-different dimensions make sqlite-vec raise, and *identical* dimensions raise
-nothing at all while returning noise.
+Every vector must come from the **same model**.
 
-`embedding_config` records the model and dimension actually used, read from the
-provider's response at ingest time. From that:
+Two models are never comparable: different dimensions make sqlite-vec raise, and *identical* dimensions raise nothing at all while returning noise.
 
-- **Ingestion refuses** to write vectors from a different model, before
-  downloading anything.
-- **Search disables the vector arm** on a mismatch and returns a notice, instead
-  of raising into a rescue and silently degrading to keyword-only.
-- **`list_indexed_packages`** reports `index_model`, `dims`, `query_model` and
-  `matches_config?`.
+`embedding_config` records the model and dimension actually used, read from the provider's response at ingest time. From that:
 
-So changing `AI_EMBED_MODEL` always costs a full re-embed of every package —
-that is a property of embeddings, not of this storage. `mix docs.reindex` is the
-supported way to do it.
+- **Ingestion refuses** to write vectors from a different model, before downloading anything.
+- **Search disables the vector arm** on a mismatch and returns a notice, instead of raising into a rescue and silently degrading to keyword-only.
+- **`list_indexed_packages`** reports `index_model`, `dims`, `query_model` and `matches_config?`.
+
+So changing `AI_EMBED_MODEL` always costs a full re-embed of every package — that is a property of embeddings, not of this storage.
+
+`mix docs.reindex` is the supported way to do it.
 
 ## Maintenance tasks
 
@@ -870,6 +656,82 @@ search_docs(package: "boruta", version: "3.0.0-beta.4",
 
 Sending the same sentence to both matches neither well. Any package not already
 indexed is downloaded, chunked and embedded first.
+
+## Local embeddings
+
+`AI_API_URL` addresses both `/embeddings` and `/chat/completions`, which assumes one provider serves both.
+
+A local embedding server does not: it has no chat route, so pointing `AI_API_URL` at it leaves `remember`'s curation calling a URL
+that 404s — and `memory_enabled?/0` only checks that a key and a model name are set, so it attempts the call rather than degrading.
+`AI_EMBED_URL` and `AI_CHAT_URL` override the shared value independently; both default to it, so a single provider still needs no extra configuration.
+
+[`text-embeddings-inference`](https://huggingface.co/docs/text-embeddings-inference) is in homebrew-core and exposes an OpenAI-compatible `/v1/embeddings`:
+
+```bash
+brew install text-embeddings-inference     # formula name
+text-embeddings-router --model-id Qwen/Qwen3-Embedding-0.6B --port 8081
+```
+
+The binary is `text-embeddings-router`, not the formula name. First run downloads
+the weights and does a warmup pass, both slow and both one-time.
+
+```json
+"AI_EMBED_URL": "http://localhost:8081/v1",
+"AI_EMBED_MODEL": "Qwen/Qwen3-Embedding-0.6B",
+"AI_API_KEY": "-",
+"EMBED_BATCH_SIZE": "32",
+"EMBED_CONCURRENCY": "1",
+"EMBED_PAUSE_MS": "0"
+```
+
+**`EMBED_BATCH_SIZE` must not exceed TEI's `max_client_batch_size`** (32 by
+default, printed at startup). Oversized batches are rejected, and the automatic
+bisection will not rescue them: `token_overflow?/1` recognises the *provider's*
+token-limit shape, and a client-batch-size rejection is a different error, so the
+ingest aborts instead of halving. Match the two numbers.
+
+`AI_API_KEY` only has to be non-empty; it is sent as a bearer token the local
+server ignores. Chat keeps going to whatever `AI_API_URL` names, so `remember`
+and `recall` are unaffected.
+
+Three things to expect:
+
+- **Switching embedders costs a full re-index**, and is refused until you run
+  one. `embedding_config` compares the *model name*, not the dimension, which
+  matters here: Qwen3-Embedding-0.6B is 1024-dim exactly like `mistral-embed`, so
+  nothing would raise and cosine would simply return noise. `mix docs.reindex` is
+  the supported path.
+- **The first ingest of a large package will not finish inside one tool call.**
+  That is the designed path, not a failure: the payload carries a
+  "still being indexed" notice, the job keeps running, and calling `search_docs`
+  again attaches to it. Drop `refresh: true` from the retry.
+- **Lower `EMBED_CONCURRENCY`, do not raise it, and do *not* set
+  `EMBED_PAUSE_MS` to zero.** Against a hosted provider the work is IO-bound and
+  concurrency hides latency; against a local server the server *is* the
+  bottleneck, so parallel requests only contend. `1` is the sensible value.
+
+  The pause is the subtler one. There is no rate limit to pace against, but TEI
+  processes sequentially on CPU whatever `max_concurrent_requests` claims, so
+  **during an ingest every search's query embedding queues behind the ingest
+  batches**. Measured on an M-series CPU with Qwen3-Embedding-0.6B: a 32-document
+  batch takes 8-17s of inference, and a query issued behind one waited 8.4s,
+  12.8s and 17.4s in `queue_time` for 48ms of its own compute. Long enough to
+  exceed the MCP transport's 30s ceiling. `EMBED_PAUSE_MS` around `200` yields
+  slots between batches so interactive searches get through; against a hosted
+  provider, where requests genuinely run in parallel, `0` remains right.
+
+Measured throughput on an M-series CPU (no Metal in the homebrew bottle):
+**~244 tokens/s**, so a 32-document batch is 8-17s and a full 3967-chunk reindex
+runs 25-30 minutes. That is a one-off, and it is the ingest side. **A single
+query embedding is ~48ms of inference**, comparable to a round trip to a hosted
+provider — search latency is not the thing to worry about here, contention is.
+
+Whether it is any *good* is measurable rather than arguable, and this is the
+argument for trying it: re-embedding locally is free, so `mix docs.eval` can
+compare embedders the way it compared retrieval strategies. The vector arm carries
+conceptual retrieval (concept recall 0.94 against FTS's 0.88) and concept MRR at
+0.65 is the weakest number in the table — the one axis never yet swept, because
+until now every attempt cost API spend.
 
 ## Appendix: example model choices
 
