@@ -31,45 +31,6 @@ defmodule StdioMcp.MixProject do
     ]
   end
 
-  # A plain Mix release, verified to work over stdio: the boot script execs
-  # `elixir --no-halt`, which sets `-noshell` but not `-noinput`, and `vm.args`
-  # adds nothing, so the transport can still read stdin. Feeding it a JSON-RPC
-  # `initialize` returns a correct response on stdout with an empty stderr.
-  #
-  # There is deliberately no Burrito build here, and the reason is the audience
-  # rather than the tooling. Burrito exists to ship an Elixir application to
-  # people who do not have Elixir; everyone who can use this server is writing
-  # Elixir on a machine that must have it, in a repo where they are already
-  # running mix commands. The one install step a self-extracting binary removes
-  # is the step this audience is guaranteed to be equipped for. (Expert is
-  # burrito-packaged and also Elixir-only, but an *editor* installs it for
-  # someone who never asked; nobody hand-writes a config for it. Here you do.)
-  #
-  # It was built and measured before being dropped, so the findings are recorded
-  # rather than left to be rediscovered:
-  #
-  #   * Packaging itself works. 43MB binary, NIFs intact, `sqlite_vec`'s `vec0`
-  #     extension loads from the extracted directory, OTP 29 ERTS bundled with no
-  #     `custom_erts`, and a prod build caches the extraction (~0.9s launch). A
-  #     dev build re-extracts 1718 files every launch, which makes any stdio
-  #     timing measurement meaningless.
-  #   * It cannot answer. The server starts, reads stdin correctly and exits
-  #     cleanly on EOF, but writes **zero bytes to stdout** where this plain
-  #     release writes 147, through an identical harness. Input works; only the
-  #     reply is lost. Ruled out by measurement: self-halting (it waits for EOF,
-  #     10.008s against the plain release's 10.026s), extraction timing, and
-  #     startup failure. Untested hypothesis: `:stdio` resolves through the group
-  #     leader under `-noshell`, and Burrito launches Erlang itself via
-  #     `execve()` rather than through the release's `bin/` script.
-  #   * Burrito 1.6.0's README asks for Zig 0.15.2; its code requires **0.16.0**
-  #     and enforces it with an exact `!=` in `Burrito.check_zig_version/0`.
-  #     Following the README costs a toolchain downgrade and a failed build.
-  #
-  # Separately, a *distributable* binary would need more than the wrapper:
-  # `config/config.exs` computes the database path with
-  # `Path.expand("../priv/mcp.db", __DIR__)` at compile time, so a binary carries
-  # the build machine's path. That would have to be resolved at runtime, with
-  # migrations run at boot, since `mix setup` does not exist inside a release.
   defp releases do
     [
       stdio_mcp: [

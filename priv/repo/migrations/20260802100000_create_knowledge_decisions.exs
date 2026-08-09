@@ -11,6 +11,7 @@ defmodule StdioMcp.Repo.Migrations.CreateKnowledgeDecisions do
       add(:top_similarity, :float)
       add(:detail, :text)
       add(:submitted_text, :text)
+      add(:curated, :boolean, default: false, null: false)
 
       timestamps()
     end

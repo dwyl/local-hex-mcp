@@ -3,6 +3,7 @@ _build/
 .expert/
 .claude/
 .agents/
+.elixir_ls
 deps/
 priv/mcp.*
 .mcp.json
@@ -10,3 +11,5 @@ priv/mcp.*
 # local MCP session log (MCP_LOG_FILE)
 tmp_logs.txt
 vendor/
+.DS_Store
+.gitignore

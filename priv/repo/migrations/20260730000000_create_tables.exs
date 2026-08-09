@@ -12,6 +12,7 @@ defmodule StdioMcp.Repo.Migrations.CreateTables do
       add :content, :text
       add :code_snippet, :text
       add :hexdocs_url, :string
+      add :source_url, :string
       add :embedding, :text
 
       timestamps()
@@ -43,6 +44,15 @@ defmodule StdioMcp.Repo.Migrations.CreateTables do
     CREATE TRIGGER IF NOT EXISTS package_docs_ad AFTER DELETE ON package_docs BEGIN
       INSERT INTO package_docs_fts(package_docs_fts, rowid, package, version, module, signature, content)
       VALUES ('delete', old.id, old.package, old.version, old.module, old.signature, old.content);
+    END;
+    """
+
+    execute """
+    CREATE TRIGGER IF NOT EXISTS package_docs_au AFTER UPDATE ON package_docs BEGIN
+      INSERT INTO package_docs_fts(package_docs_fts, rowid, package, version, module, signature, content)
+      VALUES ('delete', old.id, old.package, old.version, old.module, old.signature, old.content);
+      INSERT INTO package_docs_fts(rowid, package, version, module, signature, content)
+      VALUES (new.id, new.package, new.version, new.module, new.signature, new.content);
     END;
     """
 
@@ -80,6 +90,15 @@ defmodule StdioMcp.Repo.Migrations.CreateTables do
     CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
       INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content)
       VALUES ('delete', old.id, old.title, old.content);
+    END;
+    """
+
+    execute """
+    CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
+      INSERT INTO knowledge_fts(knowledge_fts, rowid, title, content)
+      VALUES ('delete', old.id, old.title, old.content);
+      INSERT INTO knowledge_fts(rowid, title, content)
+      VALUES (new.id, new.title, new.content);
     END;
     """
   end

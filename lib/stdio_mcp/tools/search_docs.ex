@@ -1,46 +1,15 @@
 defmodule StdioMcp.Tools.SearchDocs do
   @moduledoc """
-  Search official HexDocs documentation, typespecs, guides and code examples for
-  a single Hex package, with keyword and semantic (vector) ranking.
+  Search official HexDocs documentation, typespecs, guides, and code examples for
+  a single Hex package using hybrid keyword (FTS5) and semantic (vector) ranking.
 
-  Prefer this over grepping `deps/` when:
+  ## Usage Notes
 
-    * the package is **not installed** — evaluating a library before adding it to
-      mix.exs, where there is nothing on disk to grep;
-    * you do not know the keyword — semantic ranking finds "how do I avoid
-      re-embedding" when the docs actually say `chunk_overlap`;
-    * you need a **citable URL** — results carry the exact `hexdocs_url`;
-    * you need a version you do not have installed.
-
-  Prefer `grep` on `deps/` when the package *is* installed and you want a
-  function signature, an implementation detail, or surrounding context: the
-  source is faster to reach and is the authority, and hex packages ship their
-  README there too.
-
-  Results are always scoped to **one package**, so a question spanning several is
-  several calls: issue one per package and consolidate the answers yourself
-  rather than asking the user to. Write a distinct query for each, using the
-  terms that package's own docs would use — sending the same sentence to both
-  matches neither well. Keep the package name out of `query`; it is already
-  scoped by `package`, and repeating it only adds noise to the keyword search and
-  dilutes the query embedding.
-
-  When the calling project depends on the package, read its locked version from
-  `mix.lock` and pass it as `version`. Omitting it does not fall back to that
-  project — this server cannot see its lockfile, and resolves `"latest"` from its
-  own dependencies or Hex's latest stable release, which may be a different major
-  line. Omit `version` only when nothing local pins the package, such as when
-  evaluating a library you have not adopted.
-
-  Read the `notices` field: it reports version drift, ingestion still running,
-  and missing embeddings, and each notice names the argument to change.
-
-  A result carrying `source_url` links the exact file and line the documentation
-  was generated from — version-tagged where the package tags its docs. Docs say
-  what a function is for; the source says what it does. When the question is
-  behaviour rather than usage, follow that link, or `grep deps/<package>` if the
-  package is installed locally. It is absent for guides, and for packages whose
-  docs config sets no source URL.
+    * **Scope**: Always scoped to a single `package`. Issue separate calls for multi-package queries.
+    * **Query**: Keep `query` concise and omit the package name to avoid keyword/vector noise.
+    * **Version**: When `PROJECT_ROOT` is set, omitting `version` resolves `"latest"` to the version pinned in the calling project's `mix.lock` (falling back to Hex latest stable). Pass `version` explicitly to query an unpinned release.
+    * **Notices**: Check returned `notices` for version drift, background ingestion progress, or missing embeddings.
+    * **Source Code**: Results include `hexdocs_url` and a `source_url` linking directly to the file and line.
   """
 
   # Left at the `:forbidden` default deliberately. Declaring

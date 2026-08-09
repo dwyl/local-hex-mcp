@@ -23,7 +23,7 @@ The `search_docs` searches against **HexDocs**. Ask a question about an Elixir p
 - `SQLite` + FTS5 + `sqlite-vec`
 - `anubis_mcp`: Compatible with Claude Code, Cursor, and Google Antigravity CLI (`agy`).
 - `MDEx` for markdown (parsing and source positions — never rendering), `lazy_html` (Lexbor) for HTML extraction and per-function source links
-- Cloud AI models (embeddings, chat-small, chat-medium).
+- Cloud AI models (embeddings, chat-small, chat-large).
 
 >[!IMPORTANT]
 > It uses AI support for computing embeddings and chat completions; you must provide an **AI_API_KEY** and three models.
@@ -218,7 +218,7 @@ Everything else the server reads:
 | PROJECT_ROOT | unset | Required. The repo being edited — **not** this clone. |
 | DATABASE_PATH | `<this repo>/priv/mcp.db` | Leave it unset. The default is absolute and compiled in, so `mix setup` and the server agree by construction. Set it — in both places — only to give a project its own index. |
 | `AI_EMBED_MODEL` | `mistral-embed` | Changing it invalidates the whole index; `mix docs.reindex` is the supported path. |
-| `AI_CHAT_MODEL_SMALL` / `_LARGE` | `mistral-small-latest` / `mistral-medium-latest` | Structuring and curation for `remember`. |
+| `AI_CHAT_MODEL_SMALL` / `_LARGE` | `mistral-small-latest` / `mistral-large-latest` | Structuring and curation for `remember`. |
 | `GITHUB_TOKEN` | unset | Raises the rate limit for `search_github_issues`. |
 | `MCP_LOG_FILE` / `MCP_LOG_LEVEL` | unset / `warning` | The only way to see anything: stderr is discarded by the client. |
 
