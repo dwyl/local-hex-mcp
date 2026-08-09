@@ -65,144 +65,32 @@
     2. **You found a bug in one code path**: search for the same bug in the sibling paths — transports, adapters, backends, storage engines. They are written at different times by different people, so a fix applied to one is routinely absent from the others, and that framing is what makes a patch easy to accept.
     3. **Prefer `gh` when the CLI is available**: `gh search issues --repo owner/name --state all "…"` is faster and needs no round trip through this server. This tool exists for when `gh` is absent or unauthenticated — and because a tool in the list gets reached for, while a shell command has to be remembered.
 
-## Running the server
+## How `search_docs` retrieves
 
-### Claude Code (`.mcp.json`)
+Two arms in parallel, both scoped to the package before the cut: FTS5/BM25 top 15
+and sqlite-vec cosine top 15. Reciprocal rank fusion merges them into a pool of
+10, and **all ten come back**. The fusion is a *union*, so a document only one arm
+found can still surface — which is why a result set can mix an exact identifier
+match with a conceptually related guide.
 
-Launch `mix mcp.server` through a shell that changes directory first:
+**The tail is unranked by any model.** Nothing reorders the pool after fusion: a
+cross-encoder was built, measured and removed because candidate recall is already
+1.00 and it could only shuffle rows you read in full anyway. Expect the last few
+results to include changelog entries and loosely related functions. **Read the
+whole payload rather than trusting position** — the answer is often not first.
 
-```json
-"hex_local": {
-  "command": "sh",
-  "args": ["-c", "cd /absolute/path/to/local_hex_mcp && exec /opt/homebrew/bin/mix mcp.server --no-compile"],
-  "env": {
-    "MIX_ENV": "prod",
-    "AI_API_KEY": "…",
-    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-    "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db",
-    "PROJECT_ROOT": "/absolute/path/to/the/repo/you/are/editing"
-  }
-}
-```
+Every stage degrades rather than fails, and says so in `notices`: no embedding
+gives FTS-only, an embedding-model mismatch disables the vector arm, no keyword
+match gives vector-only. Weaker results without an error is the normal failure
+mode here, so the `notices` field is the only signal that it happened.
 
-- **Claude Code**: Has no `cwd` field in `.mcp.json` — any `cwd` key is ignored, so the server inherits the directory Claude was launched from. `sh -c "cd ... && exec ..."` is required so `mix` finds `mix.exs`.
+## Everything else is in `README.md`
 
-### Antigravity CLI (`~/.gemini/config/mcp_config.json` or `.agents/plugins/<name>/mcp_config.json`)
+Setup, client configuration, running a release, provider environment variables,
+the single-model index invariant, ingestion tuning and how to apply code changes
+are operator concerns and live there.
 
-Antigravity loads MCP configs from global configuration (`~/.gemini/config/mcp_config.json`) or workspace plugins (`.agents/plugins/<name>/mcp_config.json`). Antigravity supports `cwd` natively:
-
-```json
-"hex_local": {
-  "command": "/opt/homebrew/bin/mix",
-  "args": ["mcp.server", "--no-compile"],
-  "cwd": "/absolute/path/to/local_hex_mcp",
-  "env": {
-    "MIX_ENV": "prod",
-    "AI_API_KEY": "…",
-    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-    "DATABASE_PATH": "/absolute/path/to/local_hex_mcp/priv/mcp.db",
-    "PROJECT_ROOT": "/absolute/path/to/the/repo/you/are/editing"
-  }
-}
-```
-
-### Ingestion tuning (env vars)
-
-Set in the `env` block of `.mcp.json` / `mcp_config.json`; they take effect on a server restart, with **no recompile**. Defined in `config/runtime.exs`; a malformed or non-positive value falls back to the default rather than raising.
-
-| Variable | Default | Bounded by |
-| --- | --- | --- |
-| `INGEST_TIMEOUT_MS` | `25_000` | Must stay **below** the MCP transport's request ceiling (Anubis' session `GenServer.call` is 30s). At or above it the request dies before the "still ingesting" notice can be returned. |
-| `EMBED_BATCH_SIZE` | `200` | Inputs per embeddings request. The provider rate-limits on *requests* per second, so a larger batch is the strongest lever against 429s. The ceiling is **tokens per request**, not input count — a 141-doc package has been rejected in a single batch — but that no longer needs tuning: a token-limit rejection is bisected automatically until the halves fit. |
-| `EMBED_CONCURRENCY` | `2` | Concurrent embedding requests. Bounded by the Finch pool (size 10) and the provider's rate limit — **not** by CPU count, since the work is IO-bound and a blocked process occupies no scheduler. |
-| `EMBED_PAUSE_MS` | `0` | Pause after each embedding request, for providers that limit *requests per second*. `0` means no pacing, which is what a capable endpoint wants. Raise it only if 429s persist after lowering concurrency. |
-
-### How `search_docs` retrieves
-
-Two stages, roughly 30ms end to end once the query embedding returns:
-
-1. **Two arms in parallel, shallow.** FTS5/BM25 top 15 and sqlite-vec cosine top
-   15, both scoped to the package before the cut.
-2. **Reciprocal rank fusion** to a pool of 10, all of which is returned. This is
-   a *union* — a document either arm found can surface. Deeper arms measure
-   worse, not better: RRF rewards agreement, so 40-deep arms let
-   mediocre-but-agreed rows displace a strong single-arm hit.
-
-There is no third stage. A cross-encoder reranker was built and removed: it never
-added recall (candidate recall is already 1.00) and at a pool of 10 returned whole
-it could not add or remove a document at all, only reorder rows you read in full
-either way. See `Notes.md`, or the `rerank` branch for the code.
-
-**All ten rows come back, and the tail is unranked by any model.** Expect the
-last few to include changelog entries and loosely related functions — that is the
-accepted cost of returning the whole pool. Read the payload rather than trusting
-position.
-
-Every stage degrades rather than fails: no embedding gives FTS-only, no keyword
-match gives vector-only.
-
-`mix docs.eval` measures all of it against a fixed 28-query set with ground truth
-resolved from the database. Run it before and after any change to chunking,
-tokenisation or fusion — `Notes.md` holds the control tables and the
-history of what moved them.
-
-### The index is single-model
-
-Every vector in `package_docs` must come from the same embedding model. Two
-models are never comparable: different dimensions make sqlite-vec raise (which
-`Docs.Search.run_query/4` rescues into a silent FTS-only search), and *identical*
-dimensions raise nothing at all while returning noise.
-
-`embedding_config` holds one row recording the model and dimension that built the
-index, written from the provider's actual response at the end of each ingest.
-
-- **Ingestion refuses** to write vectors from a different model than the recorded
-  one, before downloading anything — `{:error, {:embedding_model_mismatch, …}}`.
-- **Search disables the vector arm** on a mismatch and returns a `notices` entry
-  saying so, instead of raising into the rescue.
-- **`mix docs.reindex`** is the only supported way to change models: it clears the
-  record and re-embeds every indexed package. `--only pkg1,pkg2`, `--yes`,
-  `--keep-failed`. A package that fails is **dropped** rather than left stale, and
-  re-ingests on the next search that names it.
-
-Changing `AI_EMBED_MODEL` therefore always costs a full re-embed. That is a
-property of embeddings, not of this storage: a 1024-dim and a 1536-dim index are
-different vector spaces with no conversion between them.
-
-### Provider configuration is `AI_*`
-
-`AI_API_KEY`, `AI_API_URL`, `AI_EMBED_MODEL`, `AI_CHAT_MODEL_SMALL`,
-`AI_CHAT_MODEL_LARGE`. The endpoint is pluggable — Mistral, OpenAI, Gemini,
-Cohere.
-
-`AI_EMBED_URL` and `AI_CHAT_URL` override `AI_API_URL` for one endpoint each,
-both defaulting to it. They exist because a local embedding server serves
-`/embeddings` and has no `/chat/completions`, so a single URL would leave
-`remember` calling a route that 404s. The legacy `MISTRAL_*` spellings **are not read**; if one is set without
-its `AI_*` counterpart, the server prints the replacement name to stderr and
-falls back to the default. A silent fallback to an unintended value is the same
-class of bug as the mixed-model index, so the legacy name gets a message and no
-effect.
-
-All of them are read in **one place**, `config/runtime.exs`, into the app env;
-`StdioMcp.AI.Client` reads only the app env. It used to read `System.get_env/1`
-first and fall back to the app env, which meant `runtime.exs` looked like the
-resolution point while actually being the second one — and the two disagreed, so
-setting `MISTRAL_MODEL_EMBED` on the command line was silently ignored by the
-client while appearing to work everywhere else.
-
-### Applying code changes
-
-`MIX_ENV=prod mix compile` alone does **not** affect a running server: recompiling writes new beams to disk, but a live BEAM keeps the modules it already loaded. The server must also be reconnected (`/mcp` in Claude Code) to pick them up.
-
-Comparing file timestamps cannot detect this — the beam looks newer than the source while the process still runs old code. The only reliable signal is behaviour. When a change appears not to have taken effect, reconnect before investigating the code.
-
-### Important Notes
-
-- **Mix Working Directory**: `mix` does not walk up directory trees to find `mix.exs`; it needs one in the current working directory. Launched from another project or subdirectory without changing directory first, Mix loads the wrong project and `mcp.server` is not found.
-- **`exec` in Shell Wrappers**: `exec` keeps the BEAM as the shell's own process so client process management can signal it cleanly.
-
-**After cloning or forking, update the directory path and `DATABASE_PATH` to the new checkout path.**
-A wrong `DATABASE_PATH` does not fail loudly: the server starts, tools list, and every query
-returns `no such table: package_docs` — currently wrapped in `isError: false`, so the session
-looks healthy while reading an empty database.
+They are deliberately not repeated here. This file is loaded into every session,
+so it holds only what changes *how the tools are used* — a rule earns its place
+by making an assistant behave differently, not by being true. When adding
+something, apply that test first.

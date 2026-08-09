@@ -80,6 +80,12 @@ is compiled in as `<the clone>/priv/mcp.db` — absolute, so it does not depend 
 where you run the command from, and the server opens the same file without being
 told. **Leave `DATABASE_PATH` unset** and setup and server cannot disagree.
 
+⚠️ A wrong `DATABASE_PATH` does not fail loudly. The server starts, the tools
+list, and every query returns `no such table: package_docs` — currently wrapped
+in `isError: false`, so the session looks healthy while reading an empty
+database. If searches return nothing for packages you know are indexed, check the
+`database` field of `list_indexed_packages` before anything else.
+
 `prod`, not `dev`: the MCP config runs `mix mcp.server --no-compile` under
 `MIX_ENV=prod`, so a `dev` build does not satisfy it. Repeat this step after *any*
 code change — and recompiling alone is not enough, the server must then be
@@ -209,6 +215,72 @@ or `.agents/plugins/<name>/mcp_config.json`):
 Antigravity supports `cwd` natively, so no wrapper is needed — but `cwd` is a
 literal path and cannot read `MCP_CLONE`, so the clone goes there instead of in
 the `env` block. Still three values to edit, just one of them a line higher.
+
+### Alternative: run a release
+
+A Mix release is already configured, and it works over stdio — verified by feeding
+a JSON-RPC `initialize` to the binary and getting a clean response on stdout. The
+release dispatches `elixir --no-halt` with `-noshell` but **not** `-noinput`, so
+the transport can still read stdin; `vm.args` adds nothing.
+
+Build it:
+
+```sh
+MIX_ENV=prod mix release --overwrite
+```
+
+Then point the client at the binary instead of at `mix`:
+
+```json
+{
+  "mcpServers": {
+    "hex_local": {
+      "command": "<ABSOLUTE/PATH/TO/local_hex_mcp>/_build/prod/rel/stdio_mcp/bin/stdio_mcp",
+      "args": ["start"],
+      "env": {
+        "AI_API_KEY": "<YOUR-API-KEY>",
+        "PROJECT_ROOT": "<ABSOLUTE/PATH/TO/THE/REPO/YOU/ARE/EDITING>",
+
+        "MCP_TRANSPORT": "stdio",
+        "MCP_LOG_FILE": "<ABSOLUTE/PATH/TO/local_hex_mcp>/tmp_logs.txt",
+        "MCP_LOG_LEVEL": "warning"
+      }
+    }
+  }
+}
+```
+
+**What drops out:** the `sh -c` wrapper and its `cd`, `MCP_CLONE`, `MIX_ENV`,
+`PATH`, and `--no-compile`. The release bundles its own ERTS, so it needs nothing
+from your shell and does not care what directory the client launched from — which
+is the entire reason the wrapper existed. The same config shape works for
+Antigravity, so the `cwd`-versus-`sh -c` split disappears too.
+
+**What you must add:** `MCP_TRANSPORT=stdio`. The `mix mcp.server` task sets this
+itself; a release does not, and without it `mcp_children/0` returns `[]` and you
+get a server with no MCP in it. `MCP_LOG_FILE` also has to be absolute now, since
+there is no `cd` to resolve a relative path against.
+
+**What it costs — the edit loop.** `mix compile` no longer changes what the client
+runs. Rebuild with `mix release --overwrite` and reconnect, or the old release
+keeps serving happily. Two artifacts now exist and can disagree:
+
+```
+_build/prod/lib/   what mix docs.eval runs
+_build/prod/rel/   what the MCP server runs
+```
+
+That combination can pass a verification and still serve stale code, so treat the
+release build as part of "applying code changes", not an afterthought.
+
+**This release is machine-local, not portable.** `config/config.exs` computes the
+database path with `Path.expand("../priv/mcp.db", __DIR__)` at *compile* time, so
+the binary carries an absolute path from the machine that built it. That resolves
+correctly where it was built and nowhere else. Distributing it would mean
+resolving the path at runtime (`:filename.basedir(:user_data, ~c"hex_local")` or
+similar) and running migrations at boot, since `mix setup` does not exist in a
+release. Those two changes are the bulk of what packaging with Burrito would
+require; the release itself is the easy part.
 
 ### Local embeddings
 
