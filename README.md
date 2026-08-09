@@ -18,6 +18,9 @@ The `search_docs` searches against **HexDocs**. Ask a question about an Elixir p
 
 > Why not just `grep deps/`? Because docs are generated from compiled modules, they show the API a macro produced — `grep` for `parse_options!/1` in `anubis_mcp` matches nothing, though it is called two lines below the `defschema` that makes it. And `grep` ranks nothing: it cannot connect "how do I avoid re-embedding" to the docs that say `chunk_overlap`.
 
+The "package ingestion" workflow is documented in *INGESTION.md*.
+The "tarball chunking and persistance" is documented in *TARBALL-INGESTION.md*.
+
 ## Tech
 
 - `SQLite` + FTS5 + `sqlite-vec`
