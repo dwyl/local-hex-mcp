@@ -100,11 +100,27 @@ defmodule StdioMcp.Docs.HexPackage do
   #
   # `search_github_issues` currently requires `org:`, which is precisely the
   # argument a caller cannot guess.
+  # The link *named* GitHub wins over any link that merely points at github.com.
+  # Taking the first match was order-dependent and wrong: map iteration follows
+  # key order, so `gnat` resolved to its "Changelog" entry —
+  # `github.com/nats-io/nats.ex/blob/master/CHANGELOG.md` — rather than the
+  # repository root. Callers that build a `repo:owner/name` qualifier from this
+  # would get something that matches nothing.
   defp github_url(body) do
-    body
-    |> get_in(["meta", "links"])
-    |> Kernel.||(%{})
-    |> Enum.find_value(fn {_key, value} ->
+    links = body |> get_in(["meta", "links"]) |> Kernel.||(%{})
+
+    named_github(links) || any_github(links)
+  end
+
+  defp named_github(links) do
+    Enum.find_value(links, fn {key, value} ->
+      if is_binary(value) and String.downcase(to_string(key)) == "github",
+        do: String.trim_trailing(value, "/")
+    end)
+  end
+
+  defp any_github(links) do
+    Enum.find_value(links, fn {_key, value} ->
       if is_binary(value) and String.contains?(String.downcase(value), "github.com"),
         do: String.trim_trailing(value, "/")
     end)

@@ -26,6 +26,7 @@ defmodule StdioMcp.Tools.SearchGithubIssues do
   use Anubis.Server.Component, type: :tool
 
   alias Anubis.Server.Response
+  alias StdioMcp.Docs.HexPackage
 
   schema do
     field(:query, :string,
@@ -33,9 +34,14 @@ defmodule StdioMcp.Tools.SearchGithubIssues do
       description: "Search terms matched against issue and PR titles and bodies."
     )
 
+    field(:package, :string,
+      description:
+        "Hex package name (e.g. 'anubis_mcp'). The normal path: its repository is resolved from Hex metadata, so you do not have to know that a package lives at 'zoedsoupe/anubis-mcp'. Same identifier as `search_docs` and `list_indexed_packages`."
+    )
+
     field(:repo, :string,
       description:
-        "Repository as 'owner/name' (e.g. 'zoedsoupe/anubis-mcp'). Narrower than org — prefer it when the repository is known."
+        "Repository as 'owner/name' (e.g. 'zoedsoupe/anubis-mcp'). Use when the repo is known, or for something that is not a Hex package."
     )
 
     field(:org, :string,
@@ -55,7 +61,7 @@ defmodule StdioMcp.Tools.SearchGithubIssues do
   def execute(params, frame) do
     query = Map.get(params, :query)
 
-    case scope(Map.get(params, :repo), Map.get(params, :org)) do
+    case scope(Map.get(params, :package), Map.get(params, :repo), Map.get(params, :org)) do
       {:ok, scope} ->
         opts = %{
           type_filter: type_filter(Map.get(params, :type)),
@@ -80,25 +86,73 @@ defmodule StdioMcp.Tools.SearchGithubIssues do
        frame}
   end
 
-  # `repo` wins when both are given: GitHub ANDs the two qualifiers, so the pair
-  # can only ever resolve to the repository, and naming the org as well would
-  # silently return nothing if the repository is owned by someone else.
-  defp scope(repo, org) do
-    case {presence(repo), presence(org)} do
-      {nil, nil} ->
+  # Precedence: an explicit `repo` beats a resolved `package`, which beats `org`.
+  #
+  # `package` is the normal path and the reason this resolver exists: a caller
+  # knows `anubis_mcp`, not that its code lives at `zoedsoupe/anubis-mcp`, and
+  # `org:` is precisely the argument that cannot be guessed. It also makes one
+  # identifier work across `search_docs`, `list_indexed_packages` and this tool,
+  # which is what lets them be chained without a lookup step in between.
+  #
+  # Resolution costs no extra request in the sense that matters: `HexPackage`
+  # already parses `github_url` out of the same `/packages/:name` response that
+  # version resolution needs.
+  #
+  # `repo` and `org` are never combined. GitHub ANDs the two qualifiers, so the
+  # pair can only ever resolve to the repository, and naming an org that does not
+  # own it returns nothing at all rather than an error.
+  defp scope(package, repo, org) do
+    case {presence(package), presence(repo), presence(org)} do
+      {nil, nil, nil} ->
         {:error,
-         "Pass either repo (\"owner/name\") or org — one is required to scope the search."}
+         "Pass package (a Hex name), repo (\"owner/name\") or org — one is required to scope the search."}
 
-      {nil, org} ->
+      {_package, repo, _org} when is_binary(repo) ->
+        validate_repo(repo)
+
+      {package, nil, org} when is_binary(package) ->
+        resolve_package(package, org)
+
+      {nil, nil, org} ->
         {:ok, "org:#{org}"}
-
-      {repo, _} ->
-        if String.contains?(repo, "/"),
-          do: {:ok, "repo:#{repo}"},
-          else:
-            {:error,
-             "repo must be \"owner/name\" (got #{inspect(repo)}); use org for an account."}
     end
+  end
+
+  # Falling back to `org` when the package has no GitHub link is deliberate: a
+  # package hosted elsewhere should still be searchable if the caller happened to
+  # give both, rather than failing on the more specific argument.
+  defp resolve_package(package, org) do
+    case HexPackage.fetch(package) do
+      {:ok, %HexPackage{github_url: "https://github.com/" <> path}} when path != "" ->
+        # Only the first two segments are the repository. Even the GitHub-named
+        # link is sometimes a deep link (`…/nats.ex/blob/master/CHANGELOG.md`),
+        # and anything past `owner/name` makes the qualifier match nothing.
+        case String.split(path, "/", trim: true) do
+          [owner, name | _] -> {:ok, "repo:#{owner}/#{String.trim_trailing(name, ".git")}"}
+          _ -> fallback(package, org, "has a GitHub link that is not a repository")
+        end
+
+      {:ok, %HexPackage{}} ->
+        fallback(package, org, "has no GitHub link in its Hex metadata")
+
+      {:error, :not_found} ->
+        fallback(package, org, "is not a package on Hex")
+
+      {:error, reason} ->
+        fallback(package, org, "could not be resolved (#{inspect(reason)})")
+    end
+  end
+
+  defp fallback(_package, org, _why) when is_binary(org), do: {:ok, "org:#{org}"}
+
+  defp fallback(package, _org, why),
+    do: {:error, "'#{package}' #{why}. Pass repo (\"owner/name\") or org instead."}
+
+  defp validate_repo(repo) do
+    if String.contains?(repo, "/"),
+      do: {:ok, "repo:#{repo}"},
+      else:
+        {:error, "repo must be \"owner/name\" (got #{inspect(repo)}); use org for an account."}
   end
 
   # No filter is the default on purpose. `/search/issues` returns issues and pull
@@ -134,10 +188,22 @@ defmodule StdioMcp.Tools.SearchGithubIssues do
   # A pull request is an issue carrying a `pull_request` key. Without this the
   # only signal is `/pull/` versus `/issues/` inside the URL, which is easy to
   # read past — and the distinction is the point of the search.
+  # `state: "closed"` on its own is ambiguous, and the ambiguity inverts the
+  # answer: "closed as not_planned three years ago" and "closed as completed last
+  # week" are opposite conclusions about whether a bug is real and fixed. Hence
+  # `state_reason` and `closed_at`, which the API already returns.
+  #
+  # `labels` is often the most compact signal in the whole payload — `bug`,
+  # `wontfix`, `upstream`, `needs-repro` each answer the question before the body
+  # is read — and it costs a few words.
   defp item(i) do
     %{
       type: if(i["pull_request"], do: "pr", else: "issue"),
       state: i["state"],
+      state_reason: i["state_reason"],
+      closed_at: i["closed_at"],
+      updated_at: i["updated_at"],
+      labels: Enum.map(i["labels"] || [], & &1["name"]),
       title: i["title"],
       url: i["html_url"],
       user: get_in(i, ["user", "login"]),
