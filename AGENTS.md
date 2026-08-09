@@ -54,7 +54,10 @@
 - **`get_token_usage`**: Query persistent AI token consumption statistics from SQLite.
   - Supports optional `model`, `from` (e.g. `"2026-08-01"`), and `until` date range parameters.
 
-- **`search_hex_packages`**: Search Hex.pm package names, descriptions, and download stats.
+- **`search_hex_packages`**: search Hex.pm names *and descriptions*, ranked by downloads. It answers "which package", not "how does it work" — pair it with `search_docs` once you have the name.
+  - **A question that names a technology rather than a package starts here.** "a NATS client", "how do people do HTTP in Elixir", "something for CSV" — `search_docs` cannot answer these, because it needs a package name and will happily ingest whatever you guess. That failure is silent and convincing: you get real documentation for the wrong library.
+  - **The name often does not contain the concept.** Searching `nats` returns **`gnat`** first (1.06M downloads) — the officially supported client, named nothing like the thing it implements, found only because the *description* says "A nats client in pure elixir". Behind it sit `nats_ex` (118k), `enats` (21k), `nats_msg` (7k) and a `0.0.3` BETA. Guessing the name lands on the wrong one; searching the description does not.
+  - **Downloads separate adoption, not liveness.** They are cumulative, so a once-popular abandoned package still ranks high. When currency matters, confirm with the repository or with `search_github_issues` on its org before trusting the top hit.
 
 - **`search_github_issues`**: live search of GitHub issues **and pull requests**, open and closed. Pass `repo` as `owner/name` when you know the library's repository — it is strictly narrower than `org` and returns less noise; pass `org` when the repository is unknown or the question spans several. One of the two is required. `type` (`issue` / `pr`) is optional and omitting it — searching both — is almost always what you want. `limit` defaults to 10 and accepts 1-50; issue bodies come back up to 1500 characters, marked `…[truncated]` when cut.
   - **Execute BEFORE theorising, not after.**
