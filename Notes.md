@@ -9,7 +9,6 @@ numbers are not comparable to these.
 ```
 query ─┬─ QuerySanitizer ──→ FTS5 / BM25    top 15 ┐
        └─ embed (1024-dim) → sqlite-vec     top 15 ┴─→ RRF k=60 ─→ top 10 ─→ returned
-                                                            └─(optional)→ cross-encoder
 ```
 
 Both arms join `base_query`, so package/version scoping applies *before* the depth
@@ -50,6 +49,67 @@ every bucket. Over ten items, ordering by `Σ 1/(k+rᵢ)` approximates rank-sum 
 large `k` and weights the head at `k=0`, and those disagree only when an item is
 extreme on one list and middling on the other. Recorded as a null so nobody
 re-runs it.
+
+### Re-baselined at 18 packages / 9709 rows (2026-08-09)
+
+Adding Elixir's own doc sets — `elixir` 4383, `mix` 499, `ex_unit` 196, `iex` 142,
+`logger` 100, `eex` 45 — more than doubled the corpus. This table is **top-5**, so
+it does not compare to the top-10 table above; the run it compares to is the
+12-package / 4344-row top-5 baseline taken the day before.
+
+```
+28 queries · corpus 18 packages / 9709 rows · top 5
+
+all           recall@5   MRR@10   cand    ms        concept (16)   symbol (12)
+fts               0.89      0.67   0.93    14        0.81 / 0.51    1.00 / 0.88
+vector            0.86      0.75   1.00    38        0.81 / 0.68    0.92 / 0.83
+hybrid            0.89      0.75   0.93    33        0.81 / 0.66    1.00 / 0.88
+rrf               0.96      0.74   1.00    29        0.94 / 0.61    1.00 / 0.92
+```
+
+**The vector arm did not move. Any of it.** All nine cells — `all`, `concept` and
+`symbol`, recall and MRR — are identical across a 2.2× corpus change. BM25 being
+collection-global was already recorded here as a claim; this is the natural
+experiment that makes it empirical, and it means the vector row is the control for
+every future re-baseline. If it ever moves when only the corpus changed, something
+other than the corpus changed.
+
+**`fts` recall rose while `cand` fell**, which is not a contradiction and is worth
+recognising by sight:
+
+```
+fts       recall@5        cand
+all       0.86 → 0.89     0.96 → 0.93
+concept   0.75 → 0.81     0.94 → 0.88
+```
+
+5365 new rows inflated the document frequency of exactly the words these queries
+use — `enum`, `task`, `process`, `module` — stripping them of discriminative
+weight. That lost one query from the candidate pool outright, and simultaneously
+*sharpened* the rarer terms in the remaining queries, improving the top-5 order.
+Recall and `cand` moving in opposite directions is the signature of a reweighting.
+A retrieval bug moves them together.
+
+**Fusion held.** `rrf` recall is unchanged at 0.96 / 0.94 / 1.00 — the union
+absorbed the keyword arm's pool loss, which is the property it exists for. The
+cost landed on ordering instead: `rrf` MRR 0.77 → 0.74 all-up, 0.67 → 0.61 on
+concepts, the lowest concept MRR recorded. With recall flat that is rank-shuffling
+inside a payload the consumer reads whole, which is the axis the reranker work
+concluded matters least here.
+
+**The two arms scale differently, and only one of them with the corpus.**
+
+```
+fts      8 → 14 ms (all)    9 → 19 ms (concept)
+vector  41 → 38 ms          54 → 49 ms
+```
+
+`scope_package/2` filters before the cosine, so the vector arm's cost follows the
+package, not the index — it got marginally *faster* on 2.2× the rows. FTS5's
+`MATCH` runs against the global index before scoping can narrow anything, so it
+follows total corpus size. Ingesting a package therefore has an asymmetric price:
+every query in every *other* package pays for it in the keyword arm, and nothing
+pays for it in the vector arm.
 
 ## Chunks are named by what is in them
 

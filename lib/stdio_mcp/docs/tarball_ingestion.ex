@@ -207,10 +207,21 @@ defmodule StdioMcp.Docs.TarballIngestion do
     end
   end
 
+  # Entry names are normalised because tarballs disagree about the leading `./`:
+  # `req` ships `dist/search_data-*.js`, Elixir's own docs ship
+  # `./dist/search_data-*.js`. Every lookup here is either an anchored regex
+  # (`~r{^dist/…}`) or an exact key (`Map.get(files, base <> ".md")`), so the
+  # prefix defeated all of them at once — the whole Elixir standard library
+  # failed as `:no_index_in_tarball` while the index sat in the tarball
+  # unmatched. Normalising once at extraction fixes the index and the page
+  # lookups together; doing it per-matcher would leave the next one to find.
   defp extract(tarball) do
     case :erl_tar.extract({:binary, tarball}, [:memory, :compressed]) do
       {:ok, entries} ->
-        {:ok, Map.new(entries, fn {name, content} -> {to_string(name), content} end)}
+        {:ok,
+         Map.new(entries, fn {name, content} ->
+           {name |> to_string() |> String.replace_prefix("./", ""), content}
+         end)}
 
       {:error, reason} ->
         {:error, {:extract_failed, reason}}

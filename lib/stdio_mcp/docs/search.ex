@@ -410,10 +410,35 @@ defmodule StdioMcp.Docs.Search do
     end
   end
 
-  # Resolves what to ingest, and refuses a version Hex does not publish rather
-  # than discovering it as a 404 on the tarball.
+  # Elixir's own doc sets are published to hexdocs *without* a Hex package entry:
+  # `hex.pm/api/packages/elixir` 404s while `repo.hex.pm/docs/elixir-1.18.0.tar.gz`
+  # is served, and the same holds for the five below. Asking Hex for metadata
+  # first therefore refused the most consulted documentation in any Elixir
+  # project — Kernel, Enum, Task, GenServer, ExUnit, Mix — with "No such package
+  # on Hex", which reads like a typo rather than a gap in this resolver.
+  #
+  # Their version is not a Hex question either. `mix.lock` never lists Elixir, so
+  # `PROJECT_ROOT` cannot answer it; `System.version()` is the language the server
+  # actually runs, which is the right answer for docs versioned per minor release.
+  #
+  # An explicit version is taken on trust here, since there is no release list to
+  # check it against — a wrong one surfaces as a 404 on the tarball, which is the
+  # situation the general path exists to avoid but the only one available here.
+  @core_doc_sets ~w(elixir eex ex_unit iex logger mix)
+
   @spec resolve_target(String.t(), String.t()) ::
           {:ok, String.t(), String.t() | nil} | {:error, notices()}
+  defp resolve_target(package, requested) when package in @core_doc_sets do
+    version = if requested == "latest", do: System.version(), else: requested
+
+    # nil docs_url lets `TarballIngestion.docs_base_url/3` construct
+    # `https://<package with _ as ->.hexdocs.pm/<version>`, which serves for all
+    # six — verified against elixir.hexdocs.pm and ex-unit.hexdocs.pm.
+    {:ok, version, nil}
+  end
+
+  # Resolves what to ingest, and refuses a version Hex does not publish rather
+  # than discovering it as a 404 on the tarball.
   defp resolve_target(package, requested) do
     case HexPackage.fetch(package) do
       {:ok, %StdioMcp.Docs.HexPackage{} = meta} -> target_from(meta, package, requested)

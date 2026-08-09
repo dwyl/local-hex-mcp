@@ -133,15 +133,50 @@ defmodule StdioMcp.Application do
 
   defp stdio_transport?, do: System.get_env("MCP_TRANSPORT") == "stdio"
 
+  # Two processes are watched, because they fail differently and only one of them
+  # was ever handled.
+  #
+  # The **transport** dies on stdin EOF: the client closed the pipe, so halt at
+  # once. That was the whole of this function, and it left a gap — a `/mcp`
+  # reconnect starts a replacement server without closing the old one's stdin, so
+  # the old transport waits in `receive` forever. Four such servers accumulated
+  # in a day, one alive for 17 hours, each holding a five-connection SQLite pool
+  # and ~100MB. Antigravity is better behaved: it sends SIGTERM and the process
+  # exits cleanly, which is how the reconnect path was identified as the leak.
+  #
+  # The **session** dies on idle expiry, and nothing restarts it. The transport
+  # survives, answers `no_session`, and every later tool call hangs until the
+  # client's own timeout — a server that is up and cannot work. So a session that
+  # stays down is a dead server too.
+  #
+  # "Stays" is load-bearing. A crash may be followed by a supervisor restart, and
+  # halting through a recoverable failure would turn a blip into an outage, so the
+  # session going down starts a grace period and then *rechecks the registry*
+  # rather than trusting the DOWN alone.
+  @session_grace_ms to_timeout(second: 30)
+
   @dialyzer {:no_return, monitor_transport_and_halt: 0}
   defp monitor_transport_and_halt do
     transport_name = Anubis.Server.Registry.transport_name(StdioMcp.MCPServer, :stdio)
-    pid = await_pid(transport_name)
+    session_name = Anubis.Server.Registry.stdio_session_name(StdioMcp.MCPServer)
 
-    ref = Process.monitor(pid)
+    transport_ref = Process.monitor(await_pid(transport_name))
+    session_ref = Process.monitor(await_pid(session_name))
 
     receive do
-      {:DOWN, ^ref, :process, ^pid, _reason} ->
+      {:DOWN, ^session_ref, :process, _pid, _reason} ->
+        Process.sleep(@session_grace_ms)
+
+        if is_pid(Process.whereis(session_name)) do
+          # Restarted — drop the stale transport monitor and watch the new pair.
+          Process.demonitor(transport_ref, [:flush])
+          monitor_transport_and_halt()
+        else
+          flush_file_log()
+          System.halt(0)
+        end
+
+      {:DOWN, ^transport_ref, :process, _pid, _reason} ->
         # System.halt/1 exits without running the shutdown sequence, so buffered
         # handler output is lost — the file log of a short session would be
         # empty. Sync explicitly before going down.
