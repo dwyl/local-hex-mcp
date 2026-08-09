@@ -129,31 +129,6 @@ Antigravity reads `~/.gemini/config/mcp_config.json`, or `.agents/plugins/<name>
 > - but they can all share the default database, and usually should
 > - Only one version per package is kept, so using different repos with different version will overwrite the related documentation (if search against).
 
-### Developing on this server
-
-Running from source has a shorter loop than rebuilding a release, so use `mix`
-while you are changing the code:
-
-```json
-"command": "sh",
-"args": ["-c", "cd \"$MCP_CLONE\" && exec /opt/homebrew/bin/mix mcp.server --no-compile"],
-"env": {
-  "MCP_CLONE": "<ABSOLUTE/PATH/TO/local_hex_mcp>",
-  "MIX_ENV": "prod",
-  "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
-  "…": "…"
-}
-```
-
-Then `MIX_ENV=prod mix compile` and reconnect, instead of `mix release
---overwrite` and reconnect.
-
-⚠️ **Two build artifacts can disagree.** `mix compile` writes
-`_build/prod/lib`, which is what `mix docs.eval` and other Mix tasks run; `mix
-release` writes `_build/prod/rel`, which is what the binary serves. Verifying a
-fix with `docs.eval` therefore says nothing about the running server unless you
-rebuilt the release. Pick one path per session rather than mixing them.
-
 ### Telemetry
 
 The tool `get_token_usage` returns the token consumption.
@@ -199,6 +174,31 @@ returns a clean human-friendly Markdown
 
 </details>  
 
+## Developing on this server
+
+Running from source has a shorter loop than rebuilding a release, so use `mix`
+while you are changing the code:
+
+```json
+"command": "sh",
+"args": ["-c", "cd \"$MCP_CLONE\" && exec /opt/homebrew/bin/mix mcp.server --no-compile"],
+"env": {
+  "MCP_CLONE": "<ABSOLUTE/PATH/TO/local_hex_mcp>",
+  "MIX_ENV": "prod",
+  "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+  "…": "…"
+}
+```
+
+Then `MIX_ENV=prod mix compile` and reconnect, instead of `mix release
+--overwrite` and reconnect.
+
+⚠️ **Two build artifacts can disagree.** `mix compile` writes
+`_build/prod/lib`, which is what `mix docs.eval` and other Mix tasks run; `mix
+release` writes `_build/prod/rel`, which is what the binary serves. Verifying a
+fix with `docs.eval` therefore says nothing about the running server unless you
+rebuilt the release. Pick one path per session rather than mixing them.
+
 ### Ingestion tuning
 
 Set in the `env` block of your MCP config; they take effect on a server restart, with no recompile. A malformed value falls back to the default rather than raising.
@@ -214,8 +214,8 @@ Everything else the server reads:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| $${\color{blue}\text{AI\_API\_KEY}}$$ | — | Required. `AI_API_URL` points at any OpenAI-compatible provider. |
-| $${\color{blue}\text{PROJECT\_ROOT}}$$ | unset | Required. The repo being edited — **not** this clone. |
+| AI_API_KEY | — | Required. `AI_API_URL` points at any OpenAI-compatible provider. |
+| PROJECT_ROOT | unset | Required. The repo being edited — **not** this clone. |
 | DATABASE_PATH | `<this repo>/priv/mcp.db` | Leave it unset. The default is absolute and compiled in, so `mix setup` and the server agree by construction. Set it — in both places — only to give a project its own index. |
 | `AI_EMBED_MODEL` | `mistral-embed` | Changing it invalidates the whole index; `mix docs.reindex` is the supported path. |
 | `AI_CHAT_MODEL_SMALL` / `_LARGE` | `mistral-small-latest` / `mistral-medium-latest` | Structuring and curation for `remember`. |
